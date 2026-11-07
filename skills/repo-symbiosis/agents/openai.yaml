@@ -1,0 +1,4 @@
+interface:
+  display_name: "Repo Symbiosis"
+  short_description: "Map repositories and coordinate parallel delivery"
+  default_prompt: "Use $repo-symbiosis to map this repository and coordinate its delivery workflow."
