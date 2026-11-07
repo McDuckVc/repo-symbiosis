@@ -436,7 +436,8 @@ class DeliveryTests(RepoFixture):
         group = {"merge_group": {
             "base_sha": base, "base_ref": "refs/heads/main", "head_sha": verified["candidate"],
         }}
-        self.assertEqual(self.cli("gate", "--event", "-", "--event-name", "merge_group", payload=group)["completed_runs"],
+        self.assertEqual(self.cli("gate", "--event", "-", "--event-name", "merge_group",
+                                  "--candidate", verified["candidate"], payload=group)["completed_runs"],
                          verified["completed_runs"])
 
         worktree = self.root / "agent worktree checkout"

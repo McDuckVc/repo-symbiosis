@@ -103,7 +103,8 @@ def main():
         git(project, "merge", "--no-ff", "--no-edit", commit)
     candidate = git(project, "rev-parse", "HEAD")
     group = {"merge_group": {"base_ref": "refs/heads/main", "base_sha": base, "head_sha": candidate}}
-    report = symbiosis(project, "gate", "--event-name", "merge_group", "--event", "-", payload=group)
+    report = symbiosis(project, "gate", "--event-name", "merge_group", "--event", "-", "--candidate", candidate,
+                       payload=group)
     git(project, "push", "origin", "main")
     reviewer = root / "fresh-reviewer"
     git(root, "clone", "--template=", bare.as_uri(), str(reviewer))
