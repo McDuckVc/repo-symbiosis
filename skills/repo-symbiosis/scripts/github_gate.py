@@ -174,10 +174,11 @@ def run(repo, event_name, payload, candidate, remote, coordination_remote):
     heads, runs, permitted = [], [], set()
     for entry in changes.values():
         task = entry["task"]
-        claim = report.attempt("reservation", {"task": task, "fix": (
-            f"Renew the reservation with: symbiosis renew-claim {task} --remote {coordination_remote} "
-            f"--claim-id {entry['claim']}, or claim the task again and update its manifest")},
-            claim_for, entry, claims, settings)
+        fix = ("Check the GitHub issue for the active reservation, then update the manifest or ask a maintainer to transfer it"
+               if settings["mode"] == "github-app" else
+               f"Renew with: symbiosis renew-claim {task} --remote {coordination_remote} --claim-id {entry['claim']}, "
+               "or claim the task again and update its manifest")
+        claim = report.attempt("reservation", {"task": task, "fix": fix}, claim_for, entry, claims, settings)
         if claim is None:
             continue
         if pr:

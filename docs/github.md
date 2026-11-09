@@ -31,4 +31,4 @@ The preview supports one change manifest per PR and same-repository branches. Me
 
 ## Pilot verification
 
-Use separate contributor and maintainer accounts. Verify that a valid PR passes, an out-of-scope PR fails, the contributor cannot merge or change the protected ledger, and the approved original commits can be fetched from a fresh clone. Run at least one real merge group if the repository uses a queue.
+Use separate contributor and maintainer accounts. Verify that a valid PR passes, an out-of-scope PR fails, the contributor cannot merge or change the protected ledger, and the approved original commits can be fetched from a fresh clone. In App mode, verify that a maintainer can extend an active reservation through its issue and that a contributor's attempt is rejected. Run at least one real merge group if the repository uses a queue.

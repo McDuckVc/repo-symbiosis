@@ -13,6 +13,7 @@ from .repository import read_json, require
 LOGIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}\Z")
 REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 COMMAND = re.compile(r"/symbiosis (claim|abandon|transfer @([A-Za-z0-9][A-Za-z0-9-]{0,38}))\Z")
+EXTEND = re.compile(r"/symbiosis extend ([a-f0-9]{32}) ([^\r\n]+)\Z")
 WRITERS = {"write", "maintain", "admin"}
 MANAGERS = {"maintain", "admin"}
 
@@ -37,13 +38,18 @@ def selected_job(event, payload, allowed):
     if event == "issue_comment" and action == "created":
         issue = payload["issue"]
         comment = payload["comment"]
-        match = COMMAND.fullmatch(comment["body"].strip())
-        if not match or "pull_request" in issue or issue.get("state") != "open":
+        body = comment["body"]
+        match = COMMAND.fullmatch(body.strip())
+        extension = EXTEND.fullmatch(body.strip("\r\n"))
+        if not (match or extension) or "pull_request" in issue or issue.get("state") != "open":
             return None
         author = identity(comment["user"])
         require(author == identity(payload["sender"]), "Command sender differs from the comment author")
-        details = {"issue": positive(issue["number"]), "comment": positive(comment["id"]),
-                   "actor": author, "command": "transfer" if match[2] else match[1], "target": match[2]}
+        details = {"issue": positive(issue["number"]), "comment": positive(comment["id"]), "actor": author}
+        if extension:
+            details.update(command="extend", claim=extension[1], path=extension[2])
+        else:
+            details.update(command="transfer" if match[2] else match[1], target=match[2])
     elif event == "pull_request" and action == "closed":
         details = {"pr": positive(payload["number"])}
     elif event == "deployment_status":
@@ -81,6 +87,7 @@ def command(api, job, base):
     task_id = f"issue-{job['issue']}"
     key = f"comment-{job['comment']}"
     kind = job["command"]
+    require(kind in ("claim", "transfer", "extend", "abandon"), "Unknown task command")
     if kind == "claim":
         tasks, already_done = delivery.backlog(api.file(github_gate.BACKLOG, base))
         require(task_id in tasks, "Add this issue to the protected backlog first")
@@ -94,12 +101,22 @@ def command(api, job, base):
         target = api.user(job["target"])
         require(can(target, WRITERS), "The new holder needs repository write access")
         replacement = uuid.uuid4().hex
+    elif kind == "extend":
+        require(can(actor, MANAGERS), "A maintainer must extend the reservation")
+        require(delivery.CLAIM_ID.fullmatch(job["claim"]), "Invalid claim ID")
+        delivery.scope({"id": task_id, "paths": [job["path"]]})
 
     def apply(state):
         if key in state.get("receipts", {}):
             return False
         claims, done = state["claims"], state["completed"]
         existing = claims.get(task_id)
+        if kind == "extend":
+            require(existing and existing["claim"] == job["claim"] and "github" in existing,
+                    "GitHub App reservation is missing or has changed")
+            claims[task_id] = delivery.extended_scope(existing, claims, [job["path"]], [])
+            return receipt(state, key, {"kind": kind, "task": task_id, "issue": job["issue"],
+                                        "actor": identity(actor), "claim": existing["claim"], "path": job["path"]})
         if kind == "claim":
             if existing and existing.get("github", {}).get("id") == actor["id"]:
                 return False
@@ -159,7 +176,9 @@ def close_pr(api, job, base):
     key = f"pr-{number}-{outcome}-{entry['claim']}"
 
     def apply(current):
-        if key in current.get("receipts", {}) or current["claims"].get(entry["task"]) != active:
+        latest = current["claims"].get(entry["task"])
+        # Scope extensions preserve the claim ID. A transfer rotates it.
+        if key in current.get("receipts", {}) or not latest or latest["claim"] != active["claim"]:
             return False
         del current["claims"][entry["task"]]
         if revision:

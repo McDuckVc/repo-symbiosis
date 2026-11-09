@@ -339,6 +339,10 @@ class DeliveryTests(RepoFixture):
         self.assertFalse(includes(claim, "backend/Pay ment.py"))
         self.assertFalse(includes(claim, "Docs/guide.md"))
         self.assertFalse(includes(claim, "docs"))
+        rename = {"id": "rename", "paths": ["README.md", "Readme.md"]}
+        self.assertEqual(delivery.scope(rename)[0], rename["paths"])
+        self.assertTrue(all(includes(rename, path) for path in rename["paths"]))
+        self.assertTrue(delivery.conflicts(rename, {"id": "other", "paths": ["readme.md"]}))
 
     def seed_ledger(self, receipts=None, claims=None):
         state = {"schema": 1, "claims": claims or {}, "completed": {}, "receipts": receipts or {}}
@@ -375,6 +379,34 @@ class DeliveryTests(RepoFixture):
         file = self.root / "lease-plan.json"
         file.write_text(json.dumps({"tasks": list(tasks)}), encoding="utf-8")
         return file
+
+    def test_upgrade_preserves_legacy_reservation_and_ledger_history(self):
+        legacy = {"id": "legacy", "claim": "c" * 32, "owner": "legacy", "base": self.base,
+                  "branch": "symbiosis/legacy", "paths": ["old/"], "resources": [],
+                  "created_at": "2026-01-01T00:00:00+00:00"}
+        self.seed_ledger(claims={"legacy": legacy})
+        original = self.git(self.bare, "rev-parse", REF)
+        plan = self.plan_file(self.task("new-task", "new/"))
+        issued = self.claim("new-task", plan)
+        state = self.cli("claims", "--remote", "origin")
+        self.assertEqual(state["claims"]["legacy"], legacy)
+        self.assertEqual(state["expired"], [])
+        self.assertEqual(state["claims"]["new-task"]["token_hash"], digest(issued["token"]))
+        self.assertIn("expires_at", state["claims"]["new-task"])
+        self.assertEqual(self.git(self.bare, "rev-parse", f"{REF}^"), original)
+
+    def test_app_reservation_stays_readable_and_rejects_direct_mutations(self):
+        claim = {"id": "issue-2", "claim": "c" * 32, "owner": "github:alice", "base": self.base,
+                 "branch": "symbiosis/issue-2", "paths": ["src/"], "resources": [],
+                 "created_at": "2026-01-01T00:00:00+00:00", "github": {"id": 2, "login": "alice"}}
+        self.seed_ledger(claims={claim["id"]: claim})
+        original = self.git(self.bare, "rev-parse", REF)
+        args = (claim["id"], "--remote", "origin", "--claim-id", claim["claim"])
+        self.cli("extend-claim", *args, "--path", "docs/", failure="on its GitHub issue")
+        self.cli("renew-claim", *args, "--lease", "1h", failure="have no lease")
+        self.cli("release-claim", *args, "--owner", claim["owner"], "--outcome", "abandoned", failure="Use the GitHub App")
+        self.assertEqual(self.cli("renew-claim", *args, "--hold"), claim)
+        self.assertEqual(self.git(self.bare, "rev-parse", REF), original)
 
     def claim(self, task, plan, *extra, repo=None, branch=None):
         return self.cli("claim", task, "--remote", "origin", "--plan", str(plan), "--owner", task,

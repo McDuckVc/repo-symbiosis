@@ -42,7 +42,7 @@ def scope(task):
         require(not any(char in path for char in "*?[]"), "Write paths are literals or directories ending in /")
     for resource in resources:
         valid_id(resource)
-    require(len(paths) == len(set(p.casefold() for p in paths)), "Duplicate write paths")
+    require(len(paths) == len(set(paths)), "Duplicate write paths")
     require(len(resources) == len(set(resources)), "Duplicate resources")
     return paths, resources
 
@@ -65,6 +65,20 @@ def includes(claim, path):
     # Git paths are case-sensitive, so a reservation permits only the exact paths it names.
     # Overlap detection between claims stays case-insensitive to stay safe on case-folding checkouts.
     return any(path == item or item.endswith("/") and path.startswith(item) for item in claim["paths"])
+
+
+def extended_scope(current, claims, paths, resources):
+    added = [path for path in dict.fromkeys(paths) if not includes(current, path)]
+    extra = [name for name in dict.fromkeys(resources) if name not in current["resources"]]
+    if not added and not extra:
+        return current
+    candidate = {**current, "paths": sorted(current["paths"] + added),
+                 "resources": sorted(current["resources"] + extra)}
+    scope(candidate)
+    for other in live(claims).values():
+        if other["id"] != current["id"]:
+            require(not conflicts(candidate, other), f"Extension overlaps {other['id']} ({other['owner']})")
+    return candidate
 
 
 def backlog(data):
@@ -356,6 +370,9 @@ class Ledger:
             current = claims.get(task_id)
             require(current and current["claim"] == claim_id,
                     f"Reservation for {task_id} is missing or has changed. Claim the task again.")
+            if "github" in current:
+                require(seconds is None, "GitHub App reservations have no lease")
+                return current, False
             self.authorize(current, token, "renew")
             if hold:
                 if "expires_at" not in current:
@@ -380,17 +397,11 @@ class Ledger:
             current = claims.get(task_id)
             require(current and current["claim"] == claim_id,
                     f"Reservation for {task_id} is missing or has changed. Claim the task again.")
+            require("github" not in current, "Ask a maintainer to extend the reservation on its GitHub issue")
             self.authorize(current, token, "extend")
-            added = [path for path in dict.fromkeys(paths) if not includes(current, path)]
-            extra = [name for name in dict.fromkeys(resources) if name not in current["resources"]]
-            if not added and not extra:
+            candidate = extended_scope(current, claims, paths, resources)
+            if candidate is current:
                 return current, False
-            candidate = {**current, "paths": sorted(current["paths"] + added),
-                         "resources": sorted(current["resources"] + extra)}
-            scope(candidate)
-            for other in live(claims).values():
-                if other["id"] != task_id:
-                    require(not conflicts(candidate, other), f"Extension overlaps {other['id']} ({other['owner']})")
             if "lease" in candidate:
                 start_lease(candidate, candidate["lease"])
             claims[task_id] = candidate
@@ -412,6 +423,7 @@ class Ledger:
             if not current:
                 return {"released": False, "id": task_id}, False
             require(current["claim"] == claim_id, "Reservation changed or belongs to another session")
+            require("github" not in current, "Use the GitHub App to abandon or reconcile this reservation")
             if override:
                 require("expires_at" not in current or expired(current),
                         "A reservation with a running lease can only be released by its holder. Wait for it to expire.")
@@ -507,6 +519,10 @@ def check_scope(repo, claim, against, remote="origin"):
 
 
 def extend_command(claim, paths, remote="origin"):
+    if "github" in claim:
+        issue = claim["id"].removeprefix("issue-")
+        return (f"Ask a maintainer to post /symbiosis extend {claim['claim']} <path> "
+                f"on issue #{issue}, one comment per path")
     flags = " ".join(f"--path {quote_arg(path)}" for path in paths)
     return f"symbiosis extend-claim {claim['id']} --remote {remote} --claim-id {claim['claim']} {flags}"
 

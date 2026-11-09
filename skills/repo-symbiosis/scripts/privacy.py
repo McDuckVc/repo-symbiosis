@@ -28,7 +28,7 @@ RULES = {
     "bearer-header": re.compile(r"""(?i)\bauthorization["']?\s*[:=]\s*["']?bearer\s+[A-Za-z0-9._~+/=-]{20,}"""),
     # Unquoted environment output such as API_TOKEN=abc..., skipping variables and obvious placeholders.
     "env-secret": re.compile(
-        r"""^\s*(?:export\s+)?[A-Z][A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_KEY|APIKEY|PRIVATE_KEY|ACCESS_KEY)"""
+        r"""^\s*(?:export\s+)?(?:[A-Z][A-Z0-9_]*)?(?:SECRET|TOKEN|PASSWORD|PASSWD|API_KEY|APIKEY|PRIVATE_KEY|ACCESS_KEY)"""
         r"""[A-Z0-9_]*\s*=\s*(?!["'$<{])(?!(?i:\S*(?:example|placeholder|changeme|redacted|dummy|your[_-]|xxxx)))"""
         r"""[^\s#]{12,}"""
     ),

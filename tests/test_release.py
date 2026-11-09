@@ -175,8 +175,46 @@ class PrivacyRuleTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(self.rules(text), [])
 
+    def test_bare_secret_environment_names_are_detected(self):
+        for name in ("API_KEY", "PASSWORD", "TOKEN", "ACCESS_KEY"):
+            with self.subTest(name=name):
+                self.assertEqual(self.rules(f"export {name}=" + "q1w2e3r4t5y6u7i8"), ["env-secret"])
+
 
 class AppTests(unittest.TestCase):
+    def test_app_scope_extension_checks_identity_claim_and_overlap(self):
+        api = FakeGitHub()
+        api.files[github_gate.BACKLOG]["tasks"].append({"id": "issue-3", "title": "Other", "paths": ["reports/"]})
+        job = {"event": "issue_comment", "repo": "sample/project", "repo_id": 10, "base": "main",
+               "issue": 2, "comment": 100, "actor": {"id": 2, "login": "alice"}, "command": "claim"}
+        github_app.process(api, job)
+        github_app.process(api, {**job, "issue": 3, "comment": 101})
+        original = copy.deepcopy(api.state["claims"]["issue-2"])
+        holder = {"id": 4, "login": "maintainer"}
+        payload = {"action": "created", "issue": {"number": 2, "state": "open"},
+                   "comment": {"body": f"/symbiosis extend {original['claim']} docs/team guide.md", "id": 102, "user": holder},
+                   "sender": holder, "repository": {"id": 10, "full_name": "sample/project", "default_branch": "main"},
+                   "installation": {"id": 5}}
+        extension = github_app.selected_job("issue_comment", payload, {10})
+        self.assertEqual((extension["command"], extension["path"]), ("extend", "docs/team guide.md"))
+
+        with self.assertRaisesRegex(SymbiosisError, "maintainer"):
+            github_app.process(api, {**extension, "actor": job["actor"]})
+        with self.assertRaisesRegex(SymbiosisError, "changed"):
+            github_app.process(api, {**extension, "claim": "0" * 32})
+        with self.assertRaisesRegex(SymbiosisError, "Extension overlaps issue-3"):
+            github_app.process(api, {**extension, "path": "REPORTS/result.md"})
+        with self.assertRaisesRegex(SymbiosisError, "literals"):
+            github_app.process(api, {**extension, "path": "src/*.py"})
+        self.assertEqual(api.state["claims"]["issue-2"], original)
+
+        github_app.process(api, extension)
+        github_app.process(api, {**extension, "path": "docs/replayed.md"})
+        active = api.state["claims"]["issue-2"]
+        self.assertEqual(active, {**original, "paths": sorted(original["paths"] + [extension["path"]])})
+        self.assertEqual(api.state["receipts"]["comment-102"]["path"], extension["path"])
+        self.assertIn("issue #2", delivery.extend_command(active, ["docs/another.md"]))
+
     @unittest.skipUnless(importlib.util.find_spec("cryptography"), "Optional App crypto dependency is not installed")
     def test_app_jwt_and_repository_scoped_installation_token(self):
         from cryptography.hazmat.primitives import hashes, serialization
@@ -222,7 +260,15 @@ class AppTests(unittest.TestCase):
         github_app.process(api, pr_job)
         self.assertIn(task, api.state["claims"])
         api.responses["/pulls/7"]["user"]["id"] = 3
-        github_app.process(api, pr_job)
+
+        def concurrent_extension(operation, message):
+            # The PR-close handler already read the old claim when this update starts.
+            api.state["claims"][task]["paths"].append("docs/after-review.md")
+            saved_update(operation, message)
+
+        saved_update = api.update
+        with patch.object(api, "update", side_effect=concurrent_extension):
+            github_app.process(api, pr_job)
         github_app.process(api, pr_job)
         self.assertEqual(api.state["claims"], {})
         self.assertEqual(api.state["completed"], {task: MERGE})

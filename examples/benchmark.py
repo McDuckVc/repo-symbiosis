@@ -70,7 +70,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="symbiosis-benchmark-") as temporary:
         root = Path(temporary)
         clone = root / "source"
-        subprocess.run(["git", "clone", "--local", "--no-checkout", "--template=", str(source.root), str(clone)],
+        subprocess.run(["git", "clone", "--local", "--no-hardlinks", "--no-checkout", "--template=", str(source.root), str(clone)],
                        capture_output=True, check=True)
         snapshot = sample_memory(Repository(clone), revision, root, args.records)
         query, query_time = measured(args.repeats, lambda: Snapshot(

@@ -6,8 +6,11 @@ name: Release
 permissions:
   contents: read
 jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
   release:
     name: Build and publish the release
+    needs: checks
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -26,8 +29,6 @@ jobs:
             echo "Tag $GITHUB_REF_NAME does not match package version $version"
             exit 1
           fi
-      - name: Run tests
-        run: python -B -m unittest discover -s tests -v
       - name: Build and check distributions
         run: |
           python -m pip install build twine

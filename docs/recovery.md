@@ -29,4 +29,12 @@ Pause publishing and rotate or revoke affected credentials. Contact the reposito
 
 ## Upgrade and rollback
 
-Pin the installed CLI, MCP server, and GitHub checker to a release. Run the new version against a test clone and verify existing events before updating the pinned checker in a reviewed PR. The preview uses version 1 policy, memory, and ledger schemas. Reservations created before leases and holder tokens existed have neither field. They never expire and keep the owner and claim ID check, so they continue to work after an upgrade. To roll back a tool deployment, reinstall the previous compatible wheel and restore its checker pin. Keep journal and Git commit history intact. Project owners can disable the integration and retain all approved memory files in Git.
+Upgrade the checker before enabling v0.2 ledger writes. The v0.1 checker rejects reservations that contain v0.2 leases or holder token hashes. The v0.2 checker reads both formats. Existing reservations keep their claim IDs, scope, and original authorization behavior.
+
+1. Pause new claims and scope changes. Record the protected base and coordination branch SHAs, then test the v0.2 wheel against a clone with the existing ledger and journals.
+2. Update the wheel URL and SHA-256 in the protected workflow through a reviewed PR. Verify an existing reservation with the new checker on GitHub.
+3. Upgrade the App, CLI, and MCP installations before resuming claims. Check that the updated gate accepts a new reservation and that a fresh clone can still read the earlier journals.
+
+If a v0.2 writer already updated the ledger and the v0.1 check is failing, pause new writes. Have a designated maintainer use the configured ruleset bypass to land the reviewed checker update, then rerun the affected PR checks. The checker update can recover the gate while keeping the existing coordination and journal commits.
+
+To roll back to v0.1, keep v0.2 readers active while the team finishes or explicitly releases incompatible reservations with v0.2 tooling. Verify the current ledger with the intended v0.1 checker in a test clone before restoring that pin. If active work needs the new fields, keep the v0.2 checker in place while resolving the underlying problem. Preserve all existing Git history through the rollout and recovery.

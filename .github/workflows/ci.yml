@@ -1,8 +1,11 @@
 name: Package and integration tests
 'on':
   push:
+    branches:
+      - '**'
   pull_request:
   workflow_dispatch:
+  workflow_call:
 permissions:
   contents: read
 jobs:

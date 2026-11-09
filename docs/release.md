@@ -9,7 +9,7 @@ python -m pip install dist/repo_symbiosis-0.2.0-py3-none-any.whl
 symbiosis --version
 ```
 
-Release the wheel, source distribution, checksums, and notes from a reviewed Git tag. Pushing a `v<version>` tag that matches `__version__` runs `.github/workflows/release.yml`. It tests, builds and checks the distributions, then publishes a GitHub release with `SHA256SUMS` and the pinned `--checker` URL in its notes. A tag that does not match the package version stops the workflow before anything is published. Use the checksum-pinned public wheel to initialize a GitHub check. For a private installation, use a trusted internal artifact path and equivalent pinned workflow.
+Release the wheel, source distribution, checksums, and notes from a reviewed Git tag. Pushing a `v<version>` tag runs `.github/workflows/release.yml`. The full integration and lint matrix runs against the tagged commit before publication. The release job checks the tag against `__version__`, builds and validates both distributions, and publishes the release with `SHA256SUMS` and the pinned `--checker` URL in its notes. Use the checksum-pinned public wheel to initialize a GitHub check. For a private installation, use a trusted internal artifact path and equivalent pinned workflow.
 
 ## Reproduce the demo
 
