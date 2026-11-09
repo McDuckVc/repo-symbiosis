@@ -2,7 +2,7 @@
 
 Give this prompt to a fresh agent (Claude Code, Codex, or any harness that can run shell commands and Git) with write access to the project repository. It installs Repo Symbiosis, indexes the codebase into durable memory, verifies and absorbs the handoff bundles written with [Prompt 1](handoff-export.md), adds code documentation as parallel tasks, and prepares the repository for agents from several accounts. Run Prompt 1 on the previous agents first if they hold context worth keeping.
 
-Replace `<repo-symbiosis-version>` with a release tag such as `v0.2.0`, or a commit SHA. Copy everything below the line.
+It installs Repo Symbiosis `v0.2.0`. To use a newer release, change that tag in Phase 1. Copy everything below the line.
 
 ---
 
@@ -45,7 +45,7 @@ Work through the phases in order. Keep going without asking unless you are block
 2. Install the pinned version into a virtual environment:
 
    ```text
-   python -m pip install "repo-symbiosis[mcp] @ git+https://github.com/McDuckVc/repo-symbiosis@<repo-symbiosis-version>"
+   python -m pip install "repo-symbiosis[mcp] @ git+https://github.com/McDuckVc/repo-symbiosis@v0.2.0"
    symbiosis --version
    ```
 

@@ -4,7 +4,7 @@ A portable Git workflow for project memory and parallel agent delivery. The Pyth
 
 ## Use it in a project
 
-1. Install the release wheel with `python -m pip install path/to/repo_symbiosis-0.1.0-py3-none-any.whl`. From this source tree, use `python -m pip install .`.
+1. Install the release wheel with `python -m pip install path/to/repo_symbiosis-0.2.0-py3-none-any.whl`. From this source tree, use `python -m pip install .`.
 2. In the target Git checkout, run `symbiosis init --base main` and `symbiosis doctor`. Use the [GitHub setup](docs/github.md) to install and require the scope, history, and privacy check.
 3. For Codex, copy the [skill directory](skills/repo-symbiosis) into the project's `.agents/skills/` directory and invoke `$repo-symbiosis`. Other agents can use the same Git files, CLI, or optional read-only MCP connection.
 

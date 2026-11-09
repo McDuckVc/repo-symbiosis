@@ -5,7 +5,7 @@ Install the approved wheel in a clean environment. Python 3.10 and 3.12 on Windo
 ```text
 python -m build
 python -m twine check --strict dist/*
-python -m pip install dist/repo_symbiosis-0.1.0-py3-none-any.whl
+python -m pip install dist/repo_symbiosis-0.2.0-py3-none-any.whl
 symbiosis --version
 ```
 

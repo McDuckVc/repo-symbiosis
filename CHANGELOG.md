@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
 - Scope checks match reserved paths case-sensitively. Overlap detection between reservations still ignores case.
 - Ledger writes keep the newest 1,000 coordination receipts and preserve older ones in branch history. Previously, accumulated App receipts eventually exceeded the ledger size limit and blocked every claim and release.

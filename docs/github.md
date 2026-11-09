@@ -7,7 +7,7 @@ Use Git 2.47 or later and a full clone. Use the repository's default branch for 
 Install the wheel on a maintainer machine. Initialize policy with a published wheel URL and the SHA-256 from the release assets. The verifier runs from that pinned artifact.
 
 ```text
-symbiosis init --base main --checker https://github.com/OWNER/REPO/releases/download/v0.1.0/repo_symbiosis-0.1.0-py3-none-any.whl#sha256=HASH
+symbiosis init --base main --checker https://github.com/OWNER/REPO/releases/download/v0.2.0/repo_symbiosis-0.2.0-py3-none-any.whl#sha256=HASH
 symbiosis doctor --strict
 ```
 
