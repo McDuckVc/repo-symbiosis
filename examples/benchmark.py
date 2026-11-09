@@ -44,7 +44,7 @@ def sample_memory(repo, revision, root, count):
     require(len(hashed) == len(records), "Git omitted a benchmark blob")
     repo.git("read-tree", revision)
     repo.git("update-index", "--index-info",
-             data="".join(f"100644 {oid}\t{path}\n" for path, oid in zip(records, hashed)).encode())
+             data="".join(f"100644 {oid}\t{path}\n" for path, oid in zip(records, hashed, strict=True)).encode())
     tree_id = repo.git("write-tree").decode().strip()
     return repo.git("-c", "user.name=Symbiosis Benchmark", "-c", "user.email=benchmark@example.invalid",
                     "commit-tree", tree_id, "-p", revision, "-m", "Synthetic memory benchmark").decode().strip()

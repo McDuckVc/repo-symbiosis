@@ -108,7 +108,7 @@ def command(api, job, base):
             require(not dependencies - (already_done | done.keys()), "Task prerequisites are still open")
             for dependency in sorted(dependencies & done.keys()):
                 require(api.contains(done[dependency], base), "A prerequisite merge is missing from the protected base")
-            require(not any(delivery.conflicts(proposed, claim) for claim in claims.values()),
+            require(not any(delivery.conflicts(proposed, claim) for claim in delivery.live(claims).values()),
                     "Task overlaps an active reservation")
             claims[task_id] = proposed
         elif existing:

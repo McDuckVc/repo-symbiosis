@@ -95,7 +95,7 @@ def mcp_supported():
     except importlib.metadata.PackageNotFoundError:
         return False
     match = re.match(r"(\d+)\.(\d+)", version)
-    return bool(match) and (1, 28) <= tuple(map(int, match.groups())) < (2, 0)
+    return bool(match) and (1, 28) <= tuple(map(int, match.groups())) < (3, 0)
 
 
 def doctor(repo, remote):

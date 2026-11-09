@@ -51,6 +51,10 @@ def parser():
     scan.add_argument("--since", help="List only changes since this revision")
     scan.add_argument("--shard-size", type=int, default=100)
     scan.add_argument("--shard", type=int, help="Return files for this numbered shard")
+    stale = commands.add_parser("stale", help="List memory facts whose source files changed since a base")
+    stale.add_argument("--base", required=True, help="Revision the memory was last checked against")
+    stale.add_argument("--candidate", default="HEAD")
+    stale.add_argument("--strict", action="store_true", help="Exit 1 when any fact is outdated")
     coverage = commands.add_parser("coverage", help="Compare current files to reviewed evidence")
     coverage.add_argument("--rev", default="HEAD")
     coverage.add_argument("--details", action="store_true")
@@ -65,6 +69,7 @@ def parser():
     journal.add_argument("input", help="Agent event JSON file or - for stdin")
     journal.add_argument("--remote", required=True, help="Shared coordination remote")
     journal.add_argument("--claim-id", required=True)
+    journal.add_argument("--token", help="Holder token, if this clone did not make the claim")
     lineage = commands.add_parser("verify-history", help="Check that a committed integration preserves journal and Git history")
     lineage.add_argument("--base", required=True, help="Trusted protected base commit")
     lineage.add_argument("--candidate", default="HEAD", help="Integration candidate commit")
@@ -129,14 +134,45 @@ def parser():
             command.add_argument("--plan", required=True)
             command.add_argument("--base", required=True)
             command.add_argument("--branch", required=True)
+            command.add_argument("--lease", default=delivery.DEFAULT_LEASE,
+                                 help="How long the reservation lasts without renewal, such as 30m, 4h, 2d or none")
         if name == "release-claim":
             command.add_argument("--outcome", choices=["merged", "abandoned"], required=True)
             command.add_argument("--merge-rev", help="Verified integration commit when the outcome is merged")
+            command.add_argument("--token", help="Holder token, if this clone did not make the claim")
+            command.add_argument("--override", metavar="REASON",
+                                 help="Release a held or expired reservation without its holder token")
         if name == "worktree":
             command.add_argument("--path", required=True)
         if name == "check-scope":
             command.add_argument("--against", help="An updated, verified protected base included in this branch")
+    renew = commands.add_parser("renew-claim", help="Extend a reservation's lease or hold it until merge")
+    renew.add_argument("task")
+    renew.add_argument("--remote", required=True)
+    renew.add_argument("--claim-id", required=True)
+    renew.add_argument("--token", help="Holder token, if this clone did not make the claim")
+    renewal = renew.add_mutually_exclusive_group()
+    renewal.add_argument("--lease", help="New lease length, such as 30m, 4h or 2d")
+    renewal.add_argument("--hold", action="store_true", help="Stop the lease clock until the reservation is released")
+    extend = commands.add_parser("extend-claim", help="Add paths or resources to an existing reservation")
+    extend.add_argument("task")
+    extend.add_argument("--remote", required=True)
+    extend.add_argument("--claim-id", required=True)
+    extend.add_argument("--path", action="append", default=[], help="Write path to add, repeatable")
+    extend.add_argument("--resource", action="append", default=[], help="Shared resource to add, repeatable")
+    extend.add_argument("--token", help="Holder token, if this clone did not make the claim")
     return cli
+
+
+def step_summary(markdown):
+    destination = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not destination:
+        return
+    try:
+        with open(destination, "a", encoding="utf-8") as handle:
+            handle.write(markdown)
+    except OSError as error:
+        print(f"symbiosis: could not write the step summary: {error}", file=sys.stderr)
 
 
 def input_bytes(path):
@@ -148,8 +184,18 @@ def run(args):
     if command == "gate":
         require(args.event and args.event_name, "Provide GitHub event name and payload")
         repo = Repository(args.repo, committed_read=True)
-        return github_gate.run(repo, args.event_name, read_json(input_bytes(args.event), "GitHub event"),
-                               repo.revision(args.candidate), args.remote, args.coordination_remote or args.remote)
+        value, code = github_gate.run(repo, args.event_name, read_json(input_bytes(args.event), "GitHub event"),
+                                      repo.revision(args.candidate), args.remote,
+                                      args.coordination_remote or args.remote)
+        step_summary(github_gate.summary_markdown(value))
+        if code:
+            messages = "; ".join(row["message"] for row in value["problems"])
+            print(f"symbiosis: gate found {len(value['problems'])} problem(s): {messages}", file=sys.stderr)
+        return value, code
+    if command == "stale":
+        repo = Repository(args.repo, committed_read=True)
+        report = memory.outdated(repo, repo.revision(args.base), repo.revision(args.candidate))
+        return report, 1 if args.strict and report["outdated"] else 0
     if command == "memory":
         repo = Repository(args.repo, committed_read=True)
         snapshot = Snapshot(repo, repo.revision(args.ref))
@@ -175,7 +221,7 @@ def run(args):
         tasks, completed = delivery.backlog(input_bytes(args.input))
         ledger = delivery.Ledger(Repository(args.repo), args.remote) if args.remote else None
         _, active, merged = ledger.read() if ledger else (None, {}, {})
-        return delivery.schedule(tasks, completed | merged.keys(), active, args.capacity)
+        return delivery.schedule(tasks, completed | merged.keys(), delivery.live(active), args.capacity)
     repo = Repository(args.repo)
     if command == "init":
         return setup_tools.initialize(repo, args.base, args.mode, args.checker)
@@ -202,7 +248,7 @@ def run(args):
         return memory.record(repo, repo.revision(args.rev), read_json(input_bytes(args.input), "event"))
     if command == "agent-commit":
         return agent_history.journal_commit(repo, read_json(input_bytes(args.input), "agent event"),
-                                            args.remote, args.claim_id)
+                                            args.remote, args.claim_id, args.token)
     if command in ("verify", "coverage", "search", "trace"):
         events = memory.load(repo)
         if command == "verify":
@@ -220,19 +266,24 @@ def run(args):
     ledger = delivery.Ledger(repo, args.remote)
     if command == "claims":
         revision, claims, completed = ledger.read()
-        return {"revision": revision, "claims": claims, "completed": completed}
+        expired = sorted(set(claims) - set(delivery.live(claims)))
+        return {"revision": revision, "claims": claims, "completed": completed, "expired": expired}
     if command == "claim":
         tasks, completed = delivery.backlog(input_bytes(args.plan))
         require(args.task in tasks, f"Unknown task {args.task}")
-        return ledger.claim(tasks[args.task], completed, args.owner, repo.revision(args.base), args.branch)
+        return ledger.claim(tasks[args.task], completed, args.owner, repo.revision(args.base), args.branch, args.lease)
     if command == "release-claim":
         require(bool(args.merge_rev) == (args.outcome == "merged"), "Supply --merge-rev for a merged outcome")
         revision = repo.revision(args.merge_rev) if args.merge_rev else None
-        return ledger.release(args.task, args.owner, args.claim_id, args.outcome, revision)
+        return ledger.release(args.task, args.owner, args.claim_id, args.outcome, revision, args.token, args.override)
+    if command == "renew-claim":
+        return ledger.renew(args.task, args.claim_id, args.token, args.lease, args.hold)
+    if command == "extend-claim":
+        return ledger.extend(args.task, args.claim_id, args.path, args.resource, args.token)
     claim = ledger.task_claim(args.task, args.claim_id)
     if command == "worktree":
         return delivery.add_worktree(repo, claim, args.path)
-    return delivery.check_scope(repo, claim, args.against)
+    return delivery.check_scope(repo, claim, args.against, args.remote)
 
 
 def main():

@@ -25,11 +25,14 @@ def attribution(event):
     )
 
 
-def journal_commit(repo, event, remote, claim_id):
+def journal_commit(repo, event, remote, claim_id, token=None):
     memory.validate(event, stored=False)
     require(event["kind"] == "agent", "agent-commit requires an agent event")
     task = event["task"]
-    claim = delivery.Ledger(repo, remote).task_claim(task, claim_id)
+    ledger = delivery.Ledger(repo, remote)
+    # A lapsed lease that nobody has taken over can still be renewed by its holder.
+    claim = ledger.task_claim(task, claim_id, allow_expired=True)
+    ledger.authorize(claim, token, "record work for")
     branch = repo.git("symbolic-ref", "--short", "HEAD").decode().strip()
     require(branch == claim["branch"], f"Use the reserved branch {claim['branch']}")
     agent = event["agent"]
@@ -55,13 +58,15 @@ def journal_commit(repo, event, remote, claim_id):
 
     memory.record(repo, previous["revision"] if previous else head, event)
     if path in tree:
-        original = journal_origin(repo, head, path)
-        return {"branch": branch, "commit": original, "path": path, "created": False}
-
-    trailers = "\n".join(attribution(event))
-    repo.git("add", "--", path)
-    repo.git("commit", "--only", "-m", f"Record agent {agent['phase']} for {task}", "-m", trailers, "--", path)
-    return {"branch": branch, "commit": repo.revision("HEAD"), "path": path, "created": True}
+        result = {"branch": branch, "commit": journal_origin(repo, head, path), "path": path, "created": False}
+    else:
+        trailers = "\n".join(attribution(event))
+        repo.git("add", "--", path)
+        repo.git("commit", "--only", "-m", f"Record agent {agent['phase']} for {task}", "-m", trailers, "--", path)
+        result = {"branch": branch, "commit": repo.revision("HEAD"), "path": path, "created": True}
+    # Each journal entry renews the lease. A completed run holds the reservation until merge or release.
+    lease = ledger.renew(task, claim_id, token, hold=agent["phase"] == "completed")
+    return {**result, "lease_expires_at": lease.get("expires_at")}
 
 
 def verify_history(repo, base, candidate, preserved, required_runs):

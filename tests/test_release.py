@@ -14,7 +14,7 @@ from unittest.mock import patch
 from test_symbiosis import RepoFixture
 from datetime import datetime, timedelta, timezone
 
-from scripts import app_server, delivery, github_app, github_gate
+from scripts import app_server, delivery, github_app, github_gate, privacy
 from scripts.github_api import APIError, GitHub
 from scripts.repository import SymbiosisError
 
@@ -133,6 +133,47 @@ class FakeGitHub:
         next_state = copy.deepcopy(self.state)
         if operation(next_state):
             self.state = next_state
+
+
+class PrivacyRuleTests(unittest.TestCase):
+    def rules(self, text):
+        return [row["rule"] for row in privacy.inspect("docs/symbiosis/notes.md", text.encode())]
+
+    def test_each_credential_format_is_detected(self):
+        # Samples are assembled at runtime so the repository never contains token-shaped literals.
+        samples = {
+            "google-api-key": "key " + "AIza" + "B" * 35,
+            "stripe-key": "sk_" + "live_" + "C" * 24,
+            "gitlab-token": "glpat" + "-" + "D" * 20,
+            "npm-token": "npm" + "_" + "E" * 36,
+            "pypi-token": "pypi" + "-AgEIcHlwaS5vcmc" + "F" * 60,
+            "huggingface-token": "hf" + "_" + "G" * 34,
+            "sendgrid-key": "SG" + "." + "H" * 22 + "." + "I" * 43,
+            "telegram-bot-token": "123456789" + ":AA" + "J" * 33,
+            "slack-webhook": "https://hooks.slack.com" + "/services/T0001/B0002/" + "K" * 24,
+            "azure-storage-key": "Account" + "Key=" + "L" * 88,
+            "jwt": "eyJ" + "M" * 20 + ".eyJ" + "N" * 20 + "." + "O" * 20,
+            "bearer-header": "Authorization: " + "Bearer " + "P" * 32,
+            "env-secret": "OPENROUTER_" + "API_KEY=" + "q1w2e3r4t5y6u7i8",
+        }
+        for rule, text in samples.items():
+            with self.subTest(rule=rule):
+                self.assertEqual(self.rules(text), [rule])
+
+    def test_placeholders_and_references_are_ignored(self):
+        for text in (
+            "API_TOKEN=${API_TOKEN}",
+            "API_TOKEN=<from the secret manager>",
+            "SECRET_KEY=your-secret-key-here",
+            "DB_PASSWORD=changeme-in-production",
+            "API_TOKEN=REDACTED_REDACTED",
+            "TOKEN=short",
+            "MAX_TOKENS=4096",
+            "export GITHUB_TOKEN=\"$GITHUB_TOKEN\"",
+            "Use the Authorization header with a bearer token from the vault.",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(self.rules(text), [])
 
 
 class AppTests(unittest.TestCase):

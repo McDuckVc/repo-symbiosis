@@ -12,7 +12,7 @@ license-files = ["LICENSE"]
 requires-python = ">=3.10"
 
 [project.optional-dependencies]
-mcp = ["mcp>=1.28,<2"]
+mcp = ["mcp>=1.28,<3"]
 app = ["cryptography>=43,<51", "waitress>=3,<4"]
 
 [project.scripts]
@@ -28,3 +28,14 @@ repo_symbiosis = "skills/repo-symbiosis/scripts"
 
 [tool.setuptools.dynamic]
 version = {attr = "repo_symbiosis.__version__"}
+
+[tool.ruff]
+line-length = 140
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B"]
+ignore = ["E731"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]

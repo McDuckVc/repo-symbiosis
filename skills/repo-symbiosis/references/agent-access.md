@@ -19,11 +19,13 @@ python -B <cli> --repo <checkout> memory --ref origin/main doc docs/symbiosis/RE
 
 ## From an MCP-compatible agent
 
-Install the optional SDK in a dedicated Python environment. The CLI itself only needs Python and Git.
+Install the optional SDK in a dedicated Python environment. The CLI itself only needs Python and Git. The server supports MCP Python SDK 1.28 or later, including 2.x.
 
 ```text
-<python-in-your-venv> -m pip install -r <skill>/scripts/requirements-mcp.txt
+<python-in-your-venv> -m pip install "mcp>=1.28,<3"
 ```
+
+With a wheel installation, use `python -m pip install 'repo-symbiosis[mcp]'` instead.
 
 Configure the client to launch a local stdio server. Use absolute paths, the Python interpreter with the SDK installed, and the approved repository and ref. Adapt the server configuration wrapper to your host.
 

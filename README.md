@@ -16,7 +16,7 @@ symbiosis --repo <target-checkout> coverage --details
 symbiosis --repo <target-checkout> plan <backlog.json>
 ```
 
-The initial analysis produces per-component Markdown under `docs/symbiosis/`, including architecture, runtime paths, data, deployment, onboarding, and coverage. Subsequent work adds Git-tracked events under `.symbiosis/events/`. The graph can trace relationships and show where source evidence has changed. Shared reservations live on a separate fast-forward Git branch. Each accepted task keeps its own branch and worktree through review.
+The initial analysis produces per-component Markdown under `docs/symbiosis/`, including architecture, runtime paths, data, deployment, onboarding, and coverage. Subsequent work adds Git-tracked events under `.symbiosis/events/`. The graph can trace relationships and show where source evidence has changed. Shared reservations live on a separate fast-forward Git branch in the same repository. They expire unless renewed, so a crashed agent cannot block work indefinitely. Each accepted task keeps its own branch and worktree through review.
 
 ## Read shared memory
 

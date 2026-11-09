@@ -35,3 +35,22 @@ jobs:
           symbiosis-app --help
       - name: Run integration tests
         run: python -B -m unittest discover -s tests -v
+      - name: Check the MCP server with SDK 1.x
+        run: |
+          python -m pip install "mcp>=1.28,<2"
+          python -B -m unittest discover -s tests -k test_agent_memory_over_stdio -v
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12'
+      - name: Run ruff
+        run: |
+          python -m pip install ruff==0.17.4
+          ruff check .

@@ -5,7 +5,8 @@
 1. Fetch the protected branch and the published task branch. Compare your local and remote tips before retrying a push. When the remote already has the exact SHA, continue from that commit.
 2. Read `symbiosis claims --remote origin` and `symbiosis memory --ref <published-branch> run <run>`. Reuse the reserved branch and existing worktree where available. On a fresh device, check out the published branch and repeat the scope check.
 3. Retry `agent-commit` with the same event ID and JSON. It returns the original journal commit when the event was already committed. Record new work with a new journal event.
-4. For an abandoned reservation, confirm there is no active PR. In App mode use the authorized issue command. In cooperative mode, use `release-claim` with the recorded owner and claim ID. For a merge, fetch the actual integration SHA and verify ancestry before recording completion.
+4. For an abandoned reservation, confirm there is no active PR. In App mode use the authorized issue command. In cooperative mode, a crashed agent's reservation expires with its lease and stops blocking other work; nobody needs to act. To clear a held reservation whose holder is gone, use `release-claim` with the recorded owner and claim ID plus `--override "<reason>"`. For a merge, fetch the actual integration SHA and verify ancestry before recording completion.
+5. To resume a lapsed lease that nobody has taken over, run `renew-claim` from the clone that made the claim, or pass its `--token`. If the reservation was already removed, claim the task again and regenerate the change manifest with the new claim ID.
 
 ## Emergency hotfixes
 
@@ -28,4 +29,4 @@ Pause publishing and rotate or revoke affected credentials. Contact the reposito
 
 ## Upgrade and rollback
 
-Pin the installed CLI, MCP server, and GitHub checker to a release. Run the new version against a test clone and verify existing events before updating the pinned checker in a reviewed PR. The preview uses version 1 policy, memory, and ledger schemas. To roll back a tool deployment, reinstall the previous compatible wheel and restore its checker pin. Keep journal and Git commit history intact. Project owners can disable the integration and retain all approved memory files in Git.
+Pin the installed CLI, MCP server, and GitHub checker to a release. Run the new version against a test clone and verify existing events before updating the pinned checker in a reviewed PR. The preview uses version 1 policy, memory, and ledger schemas. Reservations created before leases and holder tokens existed have neither field. They never expire and keep the owner and claim ID check, so they continue to work after an upgrade. To roll back a tool deployment, reinstall the previous compatible wheel and restore its checker pin. Keep journal and Git commit history intact. Project owners can disable the integration and retain all approved memory files in Git.
