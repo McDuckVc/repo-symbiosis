@@ -304,7 +304,11 @@ class Ledger:
         seconds = lease_seconds(lease)
         requested = {"id": task["id"], "owner": owner, "base": base, "branch": branch,
                      "paths": sorted(paths), "resources": sorted(resources)}
-        token = secrets.token_hex(16)
+        # An account-wide token lets any session of that account resume its claims after its clone is gone.
+        shared = os.environ.get(TOKEN_ENV)
+        if shared:
+            require(len(shared) >= 32, f"{TOKEN_ENV} must be at least 32 characters")
+        token = shared or secrets.token_hex(16)
         claim = {**requested, "claim": uuid.uuid4().hex, "created_at": utc_now().isoformat(),
                  "token_hash": digest(token)}
         if seconds:
@@ -327,6 +331,9 @@ class Ledger:
             claims[task["id"]] = claim
             return claim, True
 
+        if shared:
+            result = self.update(reserve, f"Reserve {task['id']} ({claim['claim']})")
+            return {**result, "token_source": "environment"}
         # Save the token before publishing so a crash after the push cannot lose it.
         key = token_key(claim["claim"])
         self.repo.git("config", "--local", key, token)

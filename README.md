@@ -42,5 +42,7 @@ The GitHub App verifies users before issuing or transferring reservations. It re
 | [Recovery](docs/recovery.md) | Interrupted runs, failed deliveries, credential incidents, upgrades |
 | [Release and demo](docs/release.md) | Build, verification, and two-agent walkthrough |
 | [Benchmark](docs/benchmark.md) | Measured inventory and memory query on TypeScript |
+| [Handoff export prompt](docs/prompts/handoff-export.md) | Have an experienced agent write its project knowledge in a standard bundle |
+| [Project bootstrap prompt](docs/prompts/project-bootstrap.md) | Have a clean agent install, index, absorb handoffs, document code, and prepare parallel work |
 
 Run `python -B -m unittest discover -s tests -v` from this package to exercise the CLI and the two-clone reservation races against temporary local Git repositories.

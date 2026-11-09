@@ -503,6 +503,27 @@ class DeliveryTests(RepoFixture):
         self.assertIn("Override by alpha: Run finished but its PR was closed",
                       self.git(self.bare, "log", "-1", "--format=%B", REF))
 
+    def test_account_token_lets_any_session_of_that_account_resume(self):
+        plan = self.plan_file(self.task("alpha", "backend/"))
+        account = {"SYMBIOSIS_CLAIM_TOKEN": "account-a-" + "k" * 32}
+        alpha = self.claim_with_env("alpha", plan, account)
+        self.assertEqual(alpha["token_source"], "environment")
+        self.assertNotIn("token", alpha)
+        self.assertNotIn(account["SYMBIOSIS_CLAIM_TOKEN"], self.git(self.repo, "config", "--list", "--local"))
+        shared = ("--remote", "origin", "--claim-id", alpha["claim"])
+        fresh = self.root / "new cloud session"
+        self.git(self.root, "clone", "--template=", "--quiet", self.bare.as_uri(), str(fresh))
+        self.identity(fresh)
+        self.cli("renew-claim", "alpha", *shared, "--lease", "2h", repo=fresh,
+                 env={"SYMBIOSIS_CLAIM_TOKEN": "account-b-" + "k" * 32}, failure="Only the session holding alpha")
+        self.assertEqual(self.cli("renew-claim", "alpha", *shared, "--lease", "2h", repo=fresh, env=account)["lease"], 7200)
+        self.claim_with_env("beta", self.plan_file(self.task("beta", "web/")), {"SYMBIOSIS_CLAIM_TOKEN": "short"},
+                            failure="at least 32 characters")
+
+    def claim_with_env(self, task, plan, env, failure=None):
+        return self.cli("claim", task, "--remote", "origin", "--plan", str(plan), "--owner", task,
+                        "--base", self.base, "--branch", f"symbiosis/{task}", env=env, failure=failure)
+
     def test_plan_scope_and_release(self):
         plan = {"tasks": [
             self.task("alpha", "backend/", resources=["api"]),
