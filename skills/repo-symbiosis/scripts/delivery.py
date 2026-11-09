@@ -1,9 +1,14 @@
 """Plan delivery waves and coordinate path reservations through a Git remote."""
 
+import hashlib
+import hmac
 import os
+import random
 import re
+import secrets
+import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from graphlib import CycleError, TopologicalSorter
 from pathlib import Path
 
@@ -16,6 +21,15 @@ REF = "refs/heads/symbiosis-coordination"
 CLAIM_ID = re.compile(r"[a-f0-9]{32}\Z")
 REMOTE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._-]*\Z")
 BRANCH = re.compile(r"symbiosis/[a-z0-9][a-z0-9-]{0,100}\Z")
+MAX_RECEIPTS = 1000
+RECEIPT_REPLAY_WINDOW = timedelta(days=7)
+DEFAULT_LEASE = "4h"
+LEASE_LIMITS = (5 * 60, 30 * 86400)
+DURATION = re.compile(r"([1-9][0-9]{0,5})([mhd])\Z")
+TOKEN_HASH = re.compile(r"[0-9a-f]{64}\Z")
+TOKEN_ENV = "SYMBIOSIS_CLAIM_TOKEN"
+COORDINATION_DEADLINE = 90
+sleep = time.sleep
 
 
 def scope(task):
@@ -28,7 +42,7 @@ def scope(task):
         require(not any(char in path for char in "*?[]"), "Write paths are literals or directories ending in /")
     for resource in resources:
         valid_id(resource)
-    require(len(paths) == len(set(p.casefold() for p in paths)), "Duplicate write paths")
+    require(len(paths) == len(set(paths)), "Duplicate write paths")
     require(len(resources) == len(set(resources)), "Duplicate resources")
     return paths, resources
 
@@ -48,9 +62,23 @@ def conflicts(first, second):
 
 
 def includes(claim, path):
-    path = path.casefold()
-    return any(path == item.casefold() or item.endswith("/") and path.startswith(item.casefold())
-               for item in claim["paths"])
+    # Git paths are case-sensitive, so a reservation permits only the exact paths it names.
+    # Overlap detection between claims stays case-insensitive to stay safe on case-folding checkouts.
+    return any(path == item or item.endswith("/") and path.startswith(item) for item in claim["paths"])
+
+
+def extended_scope(current, claims, paths, resources):
+    added = [path for path in dict.fromkeys(paths) if not includes(current, path)]
+    extra = [name for name in dict.fromkeys(resources) if name not in current["resources"]]
+    if not added and not extra:
+        return current
+    candidate = {**current, "paths": sorted(current["paths"] + added),
+                 "resources": sorted(current["resources"] + extra)}
+    scope(candidate)
+    for other in live(claims).values():
+        if other["id"] != current["id"]:
+            require(not conflicts(candidate, other), f"Extension overlaps {other['id']} ({other['owner']})")
+    return candidate
 
 
 def backlog(data):
@@ -118,6 +146,96 @@ def schedule(tasks, completed, active, capacity):
     return {"waves": waves, "blocked": blocked, "completed": sorted(completed)}
 
 
+def receipt_time(row):
+    try:
+        moment = datetime.fromisoformat(row["recorded_at"])
+    except (TypeError, KeyError, ValueError):
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def prune_receipts(state, now=None):
+    """Keep the newest receipts in the ledger head so it stays under its size limits.
+
+    Pruned receipts remain in the coordination branch history. Receipts recorded within the replay
+    window are kept even above the cap, because they still guard against duplicate webhook deliveries.
+    """
+    receipts = state.get("receipts")
+    if not receipts or len(receipts) <= MAX_RECEIPTS:
+        return 0
+    now = now or datetime.now(timezone.utc)
+    oldest = datetime.min.replace(tzinfo=timezone.utc)
+    ordered = sorted(receipts, key=lambda key: (receipt_time(receipts[key]) or oldest, key))
+    removed = 0
+    for key in ordered[:len(receipts) - MAX_RECEIPTS]:
+        moment = receipt_time(receipts[key])
+        if moment and now - moment < RECEIPT_REPLAY_WINDOW:
+            break
+        del receipts[key]
+        removed += 1
+    return removed
+
+
+def utc_now():
+    return datetime.now(timezone.utc)
+
+
+def lease_seconds(text):
+    """Parse a lease such as 30m, 4h or 2d. "none" means the reservation never expires."""
+    if text in (None, "none"):
+        return None
+    match = DURATION.fullmatch(text) if isinstance(text, str) else None
+    require(match, "Lease must look like 30m, 4h, 2d or none")
+    seconds = int(match[1]) * {"m": 60, "h": 3600, "d": 86400}[match[2]]
+    require(LEASE_LIMITS[0] <= seconds <= LEASE_LIMITS[1], "Lease must be between 5 minutes and 30 days")
+    return seconds
+
+
+def timestamp(value, label):
+    try:
+        moment = datetime.fromisoformat(value)
+    except (TypeError, ValueError) as error:
+        raise SymbiosisError(f"Invalid {label}") from error
+    require(moment.tzinfo is not None, f"The {label} needs a timezone")
+    return moment
+
+
+def expired(claim, now=None):
+    return "expires_at" in claim and timestamp(claim["expires_at"], "lease expiry") <= (now or utc_now())
+
+
+def live(claims, now=None):
+    now = now or utc_now()
+    return {key: claim for key, claim in claims.items() if not expired(claim, now)}
+
+
+def prune_expired(state, now=None):
+    """Remove expired reservations. Every ledger write calls this, so expired claims never block new ones."""
+    now = now or utc_now()
+    gone = sorted(key for key, claim in state["claims"].items() if expired(claim, now))
+    for key in gone:
+        del state["claims"][key]
+    return gone
+
+
+def start_lease(claim, seconds, now=None):
+    claim["lease"] = seconds
+    claim["expires_at"] = ((now or utc_now()) + timedelta(seconds=seconds)).isoformat()
+
+
+def digest(token):
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def token_key(claim_id):
+    return f"symbiosis.{claim_id}.token"
+
+
+def backoff(attempt):
+    """Full-jitter exponential backoff so many agents racing for the ledger spread out."""
+    sleep(random.uniform(0, min(2.0, 0.05 * 2 ** attempt)))
+
+
 class Ledger:
     def __init__(self, repo, remote):
         require(REMOTE.fullmatch(remote), "Use a configured Git remote name")
@@ -147,17 +265,22 @@ class Ledger:
         return head, state["claims"], state["completed"]
 
     def update(self, change, message):
-        for _ in range(6):
+        deadline = time.monotonic() + COORDINATION_DEADLINE
+        attempt = 0
+        while True:
             old, state = self.state()
             result, changed = change(state["claims"], state["completed"])
             if not changed:
                 return result
+            cleared = prune_expired(state)
+            prune_receipts(state)
             content = json_bytes(state)
             privacy.reject(privacy.inspect("claims.json", content))
             blob = self.repo.git("hash-object", "-w", "--stdin", data=content).strip()
             tree = self.repo.git("mktree", data=b"100644 blob " + blob + b"\tclaims.json\n").decode().strip()
             parents = ["-p", old] if old else []
-            commit = self.repo.git("commit-tree", tree, *parents, "-m", message).decode().strip()
+            text = message + (f"\n\nCleared expired reservations: {', '.join(cleared)}" if cleared else "")
+            commit = self.repo.git("commit-tree", tree, *parents, "-m", text).decode().strip()
             push = self.repo.run(
                 "-c", f"remote.{self.remote}.mirror=false", "push", "--porcelain", "--no-follow-tags",
                 "--recurse-submodules=no", self.remote, f"{commit}:{REF}",
@@ -170,15 +293,40 @@ class Ledger:
             if old:
                 require(self.repo.run("merge-base", "--is-ancestor", old, latest).returncode == 0,
                         "Coordination history was rewritten")
-        raise SymbiosisError("Coordination branch is busy. Retry the same request after checking current claims.")
+            attempt += 1
+            require(time.monotonic() < deadline,
+                    "Coordination branch is busy. Retry the same request after checking current claims.")
+            backoff(attempt)
 
-    def claim(self, task, completed, owner, base, branch):
+    def saved_token(self, claim_id):
+        result = self.repo.run("config", "--local", "--get", token_key(claim_id))
+        return result.stdout.decode().strip() if result.returncode == 0 else None
+
+    def authorize(self, claim, token, action):
+        """Reservations made with a holder token change only for a caller that presents it."""
+        if "token_hash" not in claim:
+            return
+        candidates = [token, os.environ.get(TOKEN_ENV), self.saved_token(claim["claim"])]
+        require(any(value and hmac.compare_digest(digest(value), claim["token_hash"]) for value in candidates),
+                f"Only the session holding {claim['id']} can {action} it. Pass its --token, set {TOKEN_ENV}, "
+                "or run from the clone that made the claim.")
+
+    def claim(self, task, completed, owner, base, branch, lease=DEFAULT_LEASE):
         required_text(owner, "claim owner", 100)
         require(BRANCH.fullmatch(branch), "Use a unique symbiosis/<task-and-session> branch")
         paths, resources = scope(task)
+        seconds = lease_seconds(lease)
         requested = {"id": task["id"], "owner": owner, "base": base, "branch": branch,
                      "paths": sorted(paths), "resources": sorted(resources)}
-        claim = {**requested, "claim": uuid.uuid4().hex, "created_at": datetime.now(timezone.utc).isoformat()}
+        # An account-wide token lets any session of that account resume its claims after its clone is gone.
+        shared = os.environ.get(TOKEN_ENV)
+        if shared:
+            require(len(shared) >= 32, f"{TOKEN_ENV} must be at least 32 characters")
+        token = shared or secrets.token_hex(16)
+        claim = {**requested, "claim": uuid.uuid4().hex, "created_at": utc_now().isoformat(),
+                 "token_hash": digest(token)}
+        if seconds:
+            start_lease(claim, seconds)
 
         def reserve(claims, merged):
             done = completed | merged.keys()
@@ -189,29 +337,100 @@ class Ledger:
                 require(self.repo.run("merge-base", "--is-ancestor", merged[dependency], base).returncode == 0,
                         f"Reservation base does not contain {dependency}. Fetch the protected base and retry.")
             current = claims.get(task["id"])
-            if current and all(current[key] == value for key, value in requested.items()):
+            if current and not expired(current) and all(current[key] == value for key, value in requested.items()):
                 return current, False
-            for other in claims.values():
+            for other in live(claims).values():
                 require(branch != other["branch"] and not conflicts(claim, other),
                         f"Reservation overlaps {other['id']} ({other['owner']})")
             claims[task["id"]] = claim
             return claim, True
 
-        return self.update(reserve, f"Reserve {task['id']} ({claim['claim']})")
+        if shared:
+            result = self.update(reserve, f"Reserve {task['id']} ({claim['claim']})")
+            return {**result, "token_source": "environment"}
+        # Save the token before publishing so a crash after the push cannot lose it.
+        key = token_key(claim["claim"])
+        self.repo.git("config", "--local", key, token)
+        stored = False
+        try:
+            result = self.update(reserve, f"Reserve {task['id']} ({claim['claim']})")
+            stored = result["claim"] == claim["claim"]
+        finally:
+            if not stored:
+                self.repo.run("config", "--local", "--unset", key)
+        saved = self.saved_token(result["claim"])
+        return {**result, **({"token": saved} if saved else {})}
 
-    def release(self, task_id, owner, claim_id, outcome, merge_revision):
+    def renew(self, task_id, claim_id, token=None, lease=None, hold=False):
+        valid_id(task_id)
+        require(CLAIM_ID.fullmatch(claim_id), "Invalid claim ID")
+        seconds = lease_seconds(lease) if lease else None
+
+        def change(claims, merged):
+            current = claims.get(task_id)
+            require(current and current["claim"] == claim_id,
+                    f"Reservation for {task_id} is missing or has changed. Claim the task again.")
+            if "github" in current:
+                require(seconds is None, "GitHub App reservations have no lease")
+                return current, False
+            self.authorize(current, token, "renew")
+            if hold:
+                if "expires_at" not in current:
+                    return current, False
+                del current["lease"], current["expires_at"]
+                return current, True
+            duration = seconds or current.get("lease")
+            if duration is None:
+                return current, False
+            start_lease(current, duration)
+            return current, True
+
+        action = "Hold" if hold else "Renew"
+        return self.update(change, f"{action} {task_id} ({claim_id})")
+
+    def extend(self, task_id, claim_id, paths, resources, token=None):
+        valid_id(task_id)
+        require(CLAIM_ID.fullmatch(claim_id), "Invalid claim ID")
+        require(paths or resources, "Name at least one --path or --resource to add")
+
+        def change(claims, merged):
+            current = claims.get(task_id)
+            require(current and current["claim"] == claim_id,
+                    f"Reservation for {task_id} is missing or has changed. Claim the task again.")
+            require("github" not in current, "Ask a maintainer to extend the reservation on its GitHub issue")
+            self.authorize(current, token, "extend")
+            candidate = extended_scope(current, claims, paths, resources)
+            if candidate is current:
+                return current, False
+            if "lease" in candidate:
+                start_lease(candidate, candidate["lease"])
+            claims[task_id] = candidate
+            return candidate, True
+
+        return self.update(change, f"Extend {task_id} ({claim_id})")
+
+    def release(self, task_id, owner, claim_id, outcome, merge_revision, token=None, override=None):
         valid_id(task_id)
         required_text(owner, "claim owner", 100)
         require(CLAIM_ID.fullmatch(claim_id), "Invalid claim ID")
         require(outcome in ("merged", "abandoned") and bool(merge_revision) == (outcome == "merged"),
                 "Merged outcomes need a merge revision")
+        if override is not None:
+            required_text(override, "override reason", 500)
 
         def finish(claims, merged):
             current = claims.get(task_id)
             if not current:
                 return {"released": False, "id": task_id}, False
-            require(current["claim"] == claim_id and current["owner"] == owner,
-                    "Reservation changed or belongs to another session")
+            require(current["claim"] == claim_id, "Reservation changed or belongs to another session")
+            require("github" not in current, "Use the GitHub App to abandon or reconcile this reservation")
+            if override:
+                require("expires_at" not in current or expired(current),
+                        "A reservation with a running lease can only be released by its holder. Wait for it to expire.")
+            else:
+                require(current["owner"] == owner, "Reservation changed or belongs to another session")
+                if not expired(current):
+                    self.authorize(current, token, "release")
             if merge_revision:
                 require(self.repo.run("merge-base", "--is-ancestor", current["base"], merge_revision).returncode == 0
                         and current["base"] != merge_revision, "Merge revision must descend from the reservation base")
@@ -219,12 +438,19 @@ class Ledger:
             del claims[task_id]
             return {"released": True, "id": task_id, "outcome": outcome}, True
 
-        return self.update(finish, f"Release {task_id} ({claim_id}): {outcome}")
+        note = f"\n\nOverride by {owner}: {override}" if override else ""
+        result = self.update(finish, f"Release {task_id} ({claim_id}): {outcome}{note}")
+        if result["released"]:
+            self.repo.run("config", "--local", "--unset", token_key(claim_id))
+        return result
 
-    def task_claim(self, task_id, claim_id):
+    def task_claim(self, task_id, claim_id, allow_expired=False):
         _, claims, _ = self.read()
         claim = claims.get(valid_id(task_id))
         require(claim and claim["claim"] == claim_id, "Task reservation is missing or has changed")
+        require(allow_expired or not expired(claim),
+                f"Reservation for {task_id} expired at {claim.get('expires_at')}. "
+                "Renew it with renew-claim before continuing.")
         return claim
 
 
@@ -240,12 +466,20 @@ def decode_state(content):
         require(isinstance(revision, str) and OID.fullmatch(revision), "Invalid merged task revision")
     known = []
     for key, claim in state["claims"].items():
-        shape(claim, ["id", "claim", "owner", "branch", "base", "paths", "resources", "created_at"], ["github"], "claim")
+        shape(claim, ["id", "claim", "owner", "branch", "base", "paths", "resources", "created_at"],
+              ["github", "lease", "expires_at", "token_hash"], "claim")
         require(valid_id(claim["id"]) == key, "Invalid coordination task ID")
         require(isinstance(claim["claim"], str) and CLAIM_ID.fullmatch(claim["claim"]), "Invalid claim ID")
         require(isinstance(claim["base"], str) and OID.fullmatch(claim["base"]), "Invalid claim base")
         require(isinstance(claim["branch"], str) and BRANCH.fullmatch(claim["branch"]), "Invalid task branch")
         required_text(claim["owner"], "claim owner", 100)
+        if "lease" in claim or "expires_at" in claim:
+            require(type(claim.get("lease")) is int and LEASE_LIMITS[0] <= claim["lease"] <= LEASE_LIMITS[1]
+                    and "expires_at" in claim, "Invalid reservation lease")
+            timestamp(claim["expires_at"], "lease expiry")
+        if "token_hash" in claim:
+            require(isinstance(claim["token_hash"], str) and TOKEN_HASH.fullmatch(claim["token_hash"]),
+                    "Invalid reservation token hash")
         if "github" in claim:
             identity = claim["github"]
             shape(identity, ["id", "login"], [], "GitHub claim identity")
@@ -265,7 +499,7 @@ def add_worktree(repo, claim, destination):
     return {"branch": claim["branch"], "base": claim["base"], "worktree": str(path)}
 
 
-def check_scope(repo, claim, against):
+def check_scope(repo, claim, against, remote="origin"):
     branch = repo.git("symbolic-ref", "--short", "HEAD").decode().strip()
     require(branch == claim["branch"], f"Use the reserved branch {claim['branch']}")
     base = repo.revision(against or claim["base"])
@@ -279,5 +513,19 @@ def check_scope(repo, claim, against):
     )
     paths = sorted({os.fsdecode(path) for path in differences.split(b"\0") if path})
     outside = [path for path in paths if not includes(claim, path)]
-    require(not outside, "Paths outside the reservation: " + ", ".join(map(repr, outside)))
+    require(not outside, "Paths outside the reservation: " + ", ".join(map(repr, outside))
+            + ". Reserve them with: " + extend_command(claim, outside, remote) + " (or revert them)")
     return {"base": base, "paths": paths}
+
+
+def extend_command(claim, paths, remote="origin"):
+    if "github" in claim:
+        issue = claim["id"].removeprefix("issue-")
+        return (f"Ask a maintainer to post /symbiosis extend {claim['claim']} <path> "
+                f"on issue #{issue}, one comment per path")
+    flags = " ".join(f"--path {quote_arg(path)}" for path in paths)
+    return f"symbiosis extend-claim {claim['id']} --remote {remote} --claim-id {claim['claim']} {flags}"
+
+
+def quote_arg(value):
+    return value if re.fullmatch(r"[A-Za-z0-9_./-]+", value) else "'" + value.replace("'", "'\\''") + "'"

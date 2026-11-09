@@ -4,7 +4,7 @@ A portable Git workflow for project memory and parallel agent delivery. The Pyth
 
 ## Use it in a project
 
-1. Install the release wheel with `python -m pip install path/to/repo_symbiosis-0.1.0-py3-none-any.whl`. From this source tree, use `python -m pip install .`.
+1. Install the release wheel with `python -m pip install path/to/repo_symbiosis-0.2.0-py3-none-any.whl`. From this source tree, use `python -m pip install .`.
 2. In the target Git checkout, run `symbiosis init --base main` and `symbiosis doctor`. Use the [GitHub setup](docs/github.md) to install and require the scope, history, and privacy check.
 3. For Codex, copy the [skill directory](skills/repo-symbiosis) into the project's `.agents/skills/` directory and invoke `$repo-symbiosis`. Other agents can use the same Git files, CLI, or optional read-only MCP connection.
 
@@ -16,7 +16,7 @@ symbiosis --repo <target-checkout> coverage --details
 symbiosis --repo <target-checkout> plan <backlog.json>
 ```
 
-The initial analysis produces per-component Markdown under `docs/symbiosis/`, including architecture, runtime paths, data, deployment, onboarding, and coverage. Subsequent work adds Git-tracked events under `.symbiosis/events/`. The graph can trace relationships and show where source evidence has changed. Shared reservations live on a separate fast-forward Git branch. Each accepted task keeps its own branch and worktree through review.
+The initial analysis produces per-component Markdown under `docs/symbiosis/`, including architecture, runtime paths, data, deployment, onboarding, and coverage. Subsequent work adds Git-tracked events under `.symbiosis/events/`. The graph can trace relationships and show where source evidence has changed. Shared reservations live on a separate fast-forward Git branch in the same repository. They expire unless renewed, so a crashed agent cannot block work indefinitely. Each accepted task keeps its own branch and worktree through review.
 
 ## Read shared memory
 
@@ -42,5 +42,7 @@ The GitHub App verifies users before issuing or transferring reservations. It re
 | [Recovery](docs/recovery.md) | Interrupted runs, failed deliveries, credential incidents, upgrades |
 | [Release and demo](docs/release.md) | Build, verification, and two-agent walkthrough |
 | [Benchmark](docs/benchmark.md) | Measured inventory and memory query on TypeScript |
+| [Handoff export prompt](docs/prompts/handoff-export.md) | Have an experienced agent write its project knowledge in a standard bundle |
+| [Project bootstrap prompt](docs/prompts/project-bootstrap.md) | Have a clean agent install, index, absorb handoffs, document code, and prepare parallel work |
 
 Run `python -B -m unittest discover -s tests -v` from this package to exercise the CLI and the two-clone reservation races against temporary local Git repositories.

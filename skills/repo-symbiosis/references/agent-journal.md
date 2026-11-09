@@ -35,7 +35,7 @@ python -B <cli> --repo <worktree> agent-commit <event.json> --remote <coord> --c
 python -B <cli> --repo <worktree> check-scope <task> --remote <coord> --claim-id <claim>
 ```
 
-`agent-commit` checks the active reservation, reserved branch, journal path, and committed predecessor. It records the current code commit, adds only the new journal file, and includes the task, run, event, actor, and provider as Git commit trailers. Git uses the configured person or service identity. Agents operating read-only can have the coordinator append an attributed journal commit for their result. Each writer uses their own Git credentials.
+`agent-commit` checks the reservation, holder token, reserved branch, journal path, and committed predecessor. It renews the reservation lease after each entry and returns `lease_expires_at`. A `completed` entry holds the reservation until it is released, so review time does not expire it. Pass `--token` or set `SYMBIOSIS_CLAIM_TOKEN` when journaling from a clone that did not make the claim. It records the current code commit, adds only the new journal file, and includes the task, run, event, actor, and provider as Git commit trailers. Git uses the configured person or service identity. Agents operating read-only can have the coordinator append an attributed journal commit for their result. Each writer uses their own Git credentials.
 
 Retry an interrupted commit with the same event input and ID. A committed retry returns the original journal commit. A change to an existing entry requires a new event or follow-up run. If a branch push loses its acknowledgement, fetch the published branch and compare its tip with the local commit before resuming.
 

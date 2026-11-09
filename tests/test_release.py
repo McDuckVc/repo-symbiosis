@@ -12,7 +12,9 @@ import uuid
 from unittest.mock import patch
 
 from test_symbiosis import RepoFixture
-from scripts import app_server, github_app, github_gate
+from datetime import datetime, timedelta, timezone
+
+from scripts import app_server, delivery, github_app, github_gate, privacy
 from scripts.github_api import APIError, GitHub
 from scripts.repository import SymbiosisError
 
@@ -133,7 +135,86 @@ class FakeGitHub:
             self.state = next_state
 
 
+class PrivacyRuleTests(unittest.TestCase):
+    def rules(self, text):
+        return [row["rule"] for row in privacy.inspect("docs/symbiosis/notes.md", text.encode())]
+
+    def test_each_credential_format_is_detected(self):
+        # Samples are assembled at runtime so the repository never contains token-shaped literals.
+        samples = {
+            "google-api-key": "key " + "AIza" + "B" * 35,
+            "stripe-key": "sk_" + "live_" + "C" * 24,
+            "gitlab-token": "glpat" + "-" + "D" * 20,
+            "npm-token": "npm" + "_" + "E" * 36,
+            "pypi-token": "pypi" + "-AgEIcHlwaS5vcmc" + "F" * 60,
+            "huggingface-token": "hf" + "_" + "G" * 34,
+            "sendgrid-key": "SG" + "." + "H" * 22 + "." + "I" * 43,
+            "telegram-bot-token": "123456789" + ":AA" + "J" * 33,
+            "slack-webhook": "https://hooks.slack.com" + "/services/T0001/B0002/" + "K" * 24,
+            "azure-storage-key": "Account" + "Key=" + "L" * 88,
+            "jwt": "eyJ" + "M" * 20 + ".eyJ" + "N" * 20 + "." + "O" * 20,
+            "bearer-header": "Authorization: " + "Bearer " + "P" * 32,
+            "env-secret": "OPENROUTER_" + "API_KEY=" + "q1w2e3r4t5y6u7i8",
+        }
+        for rule, text in samples.items():
+            with self.subTest(rule=rule):
+                self.assertEqual(self.rules(text), [rule])
+
+    def test_placeholders_and_references_are_ignored(self):
+        for text in (
+            "API_TOKEN=${API_TOKEN}",
+            "API_TOKEN=<from the secret manager>",
+            "SECRET_KEY=your-secret-key-here",
+            "DB_PASSWORD=changeme-in-production",
+            "API_TOKEN=REDACTED_REDACTED",
+            "TOKEN=short",
+            "MAX_TOKENS=4096",
+            "export GITHUB_TOKEN=\"$GITHUB_TOKEN\"",
+            "Use the Authorization header with a bearer token from the vault.",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(self.rules(text), [])
+
+    def test_bare_secret_environment_names_are_detected(self):
+        for name in ("API_KEY", "PASSWORD", "TOKEN", "ACCESS_KEY"):
+            with self.subTest(name=name):
+                self.assertEqual(self.rules(f"export {name}=" + "q1w2e3r4t5y6u7i8"), ["env-secret"])
+
+
 class AppTests(unittest.TestCase):
+    def test_app_scope_extension_checks_identity_claim_and_overlap(self):
+        api = FakeGitHub()
+        api.files[github_gate.BACKLOG]["tasks"].append({"id": "issue-3", "title": "Other", "paths": ["reports/"]})
+        job = {"event": "issue_comment", "repo": "sample/project", "repo_id": 10, "base": "main",
+               "issue": 2, "comment": 100, "actor": {"id": 2, "login": "alice"}, "command": "claim"}
+        github_app.process(api, job)
+        github_app.process(api, {**job, "issue": 3, "comment": 101})
+        original = copy.deepcopy(api.state["claims"]["issue-2"])
+        holder = {"id": 4, "login": "maintainer"}
+        payload = {"action": "created", "issue": {"number": 2, "state": "open"},
+                   "comment": {"body": f"/symbiosis extend {original['claim']} docs/team guide.md", "id": 102, "user": holder},
+                   "sender": holder, "repository": {"id": 10, "full_name": "sample/project", "default_branch": "main"},
+                   "installation": {"id": 5}}
+        extension = github_app.selected_job("issue_comment", payload, {10})
+        self.assertEqual((extension["command"], extension["path"]), ("extend", "docs/team guide.md"))
+
+        with self.assertRaisesRegex(SymbiosisError, "maintainer"):
+            github_app.process(api, {**extension, "actor": job["actor"]})
+        with self.assertRaisesRegex(SymbiosisError, "changed"):
+            github_app.process(api, {**extension, "claim": "0" * 32})
+        with self.assertRaisesRegex(SymbiosisError, "Extension overlaps issue-3"):
+            github_app.process(api, {**extension, "path": "REPORTS/result.md"})
+        with self.assertRaisesRegex(SymbiosisError, "literals"):
+            github_app.process(api, {**extension, "path": "src/*.py"})
+        self.assertEqual(api.state["claims"]["issue-2"], original)
+
+        github_app.process(api, extension)
+        github_app.process(api, {**extension, "path": "docs/replayed.md"})
+        active = api.state["claims"]["issue-2"]
+        self.assertEqual(active, {**original, "paths": sorted(original["paths"] + [extension["path"]])})
+        self.assertEqual(api.state["receipts"]["comment-102"]["path"], extension["path"])
+        self.assertIn("issue #2", delivery.extend_command(active, ["docs/another.md"]))
+
     @unittest.skipUnless(importlib.util.find_spec("cryptography"), "Optional App crypto dependency is not installed")
     def test_app_jwt_and_repository_scoped_installation_token(self):
         from cryptography.hazmat.primitives import hashes, serialization
@@ -179,7 +260,15 @@ class AppTests(unittest.TestCase):
         github_app.process(api, pr_job)
         self.assertIn(task, api.state["claims"])
         api.responses["/pulls/7"]["user"]["id"] = 3
-        github_app.process(api, pr_job)
+
+        def concurrent_extension(operation, message):
+            # The PR-close handler already read the old claim when this update starts.
+            api.state["claims"][task]["paths"].append("docs/after-review.md")
+            saved_update(operation, message)
+
+        saved_update = api.update
+        with patch.object(api, "update", side_effect=concurrent_extension):
+            github_app.process(api, pr_job)
         github_app.process(api, pr_job)
         self.assertEqual(api.state["claims"], {})
         self.assertEqual(api.state["completed"], {task: MERGE})
@@ -218,3 +307,43 @@ class AppTests(unittest.TestCase):
         snapshots = [json.loads(body["tree"][0]["content"]) for _, path, body in writes if path == "/git/trees"]
         self.assertEqual(set(snapshots[-1]["receipts"]), {"other", "mine"})
         self.assertTrue(all(body["force"] is False for method, _, body in writes if method == "PATCH"))
+
+    def test_receipt_pruning_keeps_recent_replay_guards(self):
+        now = datetime(2026, 11, 9, tzinfo=timezone.utc)
+        stamp = lambda days, i: (now - timedelta(days=days, seconds=i)).isoformat()
+        state = {"receipts": {f"old-{i}": {"recorded_at": stamp(30, i)} for i in range(300)}}
+        state["receipts"].update({f"new-{i}": {"recorded_at": stamp(1, i)} for i in range(delivery.MAX_RECEIPTS)})
+        state["receipts"]["broken"] = {"recorded_at": "not-a-time"}
+        self.assertEqual(delivery.prune_receipts(state, now), 301)
+        self.assertEqual(set(state["receipts"]), {f"new-{i}" for i in range(delivery.MAX_RECEIPTS)})
+
+        recent = {"receipts": {f"r-{i}": {"recorded_at": stamp(2, i)} for i in range(delivery.MAX_RECEIPTS + 50)}}
+        self.assertEqual(delivery.prune_receipts(recent, now), 0)
+        self.assertEqual(len(recent["receipts"]), delivery.MAX_RECEIPTS + 50)
+
+        small = {"receipts": {"only": {"recorded_at": stamp(400, 0)}}}
+        self.assertEqual(delivery.prune_receipts(small, now), 0)
+        self.assertEqual(delivery.prune_receipts({"schema": 1}, now), 0)
+
+    def test_app_ledger_write_prunes_old_receipts(self):
+        api = GitHub.__new__(GitHub)
+        old = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        state = {"schema": 1, "claims": {}, "completed": {}, "receipts": {
+            f"deployment-{i}-{i}": {"kind": "deployment", "recorded_at": (old + timedelta(seconds=i)).isoformat()}
+            for i in range(delivery.MAX_RECEIPTS + 200)
+        }}
+        writes = []
+
+        def call(method, path, body=None):
+            writes.append((method, path, body))
+            return {"sha": HEAD} if path == "/git/trees" else {"sha": MERGE} if path == "/git/commits" else None
+
+        with (
+            patch.object(api, "ledger", return_value=(BASE, copy.deepcopy(state))),
+            patch.object(api, "call", side_effect=call),
+        ):
+            api.update(lambda current: github_app.receipt(current, "mine", {"kind": "test"}), "Receipt")
+        written = json.loads(next(body for _, path, body in writes if path == "/git/trees")["tree"][0]["content"])
+        self.assertEqual(len(written["receipts"]), delivery.MAX_RECEIPTS)
+        self.assertIn("mine", written["receipts"])
+        self.assertNotIn("deployment-0-0", written["receipts"])

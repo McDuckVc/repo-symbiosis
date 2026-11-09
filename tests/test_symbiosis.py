@@ -2,21 +2,33 @@
 
 import asyncio
 import concurrent.futures
-import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import threading
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills" / "repo-symbiosis" / "scripts"
 sys.path.insert(0, str(SCRIPTS.parent))
 
-from scripts.delivery import REF, Ledger
+from scripts import delivery, github_gate
+from scripts.delivery import MAX_RECEIPTS, REF, Ledger, digest, includes
 from scripts.repository import Repository, SymbiosisError
+from scripts.setup_tools import mcp_supported
+
+
+def field(value, camel, snake):
+    """Read an MCP result field under its 1.x (camelCase) or 2.x (snake_case) name."""
+    return getattr(value, camel) if hasattr(value, camel) else getattr(value, snake)
+
+
+def structured(result):
+    return field(result, "structuredContent", "structured_content")
 
 
 def journal_event(run, task, sequence, phase, **details):
@@ -65,13 +77,14 @@ class RepoFixture(unittest.TestCase):
         self.git(self.repo, "add", "--all")
         self.git(self.repo, "commit", "-m", message)
 
-    def raw_cli(self, *args, payload=None, repo=None):
+    def raw_cli(self, *args, payload=None, repo=None, env=None):
         command = [sys.executable, "-B", str(SCRIPTS / "symbiosis.py"), "--repo", str(repo or self.repo), *args]
         return subprocess.run(command, input=json.dumps(payload) if payload is not None else None,
-                              capture_output=True, text=True, check=False)
+                              capture_output=True, text=True, check=False,
+                              env={**os.environ, **env} if env else None)
 
-    def cli(self, *args, payload=None, failure=None, repo=None):
-        result = self.raw_cli(*args, payload=payload, repo=repo)
+    def cli(self, *args, payload=None, failure=None, repo=None, env=None):
+        result = self.raw_cli(*args, payload=payload, repo=repo, env=env)
         if failure:
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
             self.assertIn(failure, result.stderr)
@@ -133,6 +146,21 @@ class MemoryTests(RepoFixture):
         original = event.read_text(encoding="utf-8")
         event.write_text(original.replace("checkout", "rewritten", 1), encoding="utf-8")
         self.cli("verify", "--base", protected, failure="Historical event rewritten")
+
+    def test_stale_lists_facts_made_outdated_by_a_change(self):
+        self.cli("record", "-", payload=self.event("analysis-checkout-01"))
+        self.commit("Record checkout analysis")
+        base = self.git(self.repo, "rev-parse", "HEAD")
+        self.assertEqual(self.cli("stale", "--base", base)["outdated"], [])
+        self.source.write_text("def pay():\n    return 3\n", encoding="utf-8")
+        self.commit("Change payment")
+        report = self.cli("stale", "--base", base)
+        self.assertEqual(report["outdated"], [{"event": "analysis-checkout-01", "summary": "Pägement checkout",
+                                               "paths": ["backend/pay ment.py"]}])
+        self.assertEqual(self.raw_cli("stale", "--base", base, "--strict").returncode, 1)
+        self.cli("record", "-", payload=self.event("analysis-checkout-02", supersedes=["analysis-checkout-01"]))
+        self.commit("Refresh checkout analysis")
+        self.assertEqual(self.cli("stale", "--base", base)["outdated"], [])
 
     def test_release_chain_matches_revision_and_digest(self):
         digest = "sha256:" + "a" * 64
@@ -197,7 +225,7 @@ class MemoryTests(RepoFixture):
         self.assertEqual(next_run["parent"], handoff["id"])
         self.assertEqual(next_run["provider"], "antigravity")
 
-    @unittest.skipUnless(importlib.util.find_spec("mcp"), "Optional MCP SDK is not installed")
+    @unittest.skipUnless(mcp_supported(), "Optional MCP SDK (mcp>=1.28,<3) is not installed")
     def test_agent_memory_over_stdio(self):
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
@@ -220,29 +248,30 @@ class MemoryTests(RepoFixture):
                         "memory_overview", "memory_search", "memory_event", "memory_run",
                         "memory_trace", "memory_read_doc",
                     })
-                    self.assertTrue(all(tool.annotations.readOnlyHint for tool in tools))
+                    self.assertTrue(all(field(tool.annotations, "readOnlyHint", "read_only_hint") for tool in tools))
                     result = await session.call_tool("memory_overview")
-                    self.assertFalse(result.isError, result.content)
-                    self.assertEqual(result.structuredContent["revision"], revision)
+                    self.assertFalse(field(result, "isError", "is_error"), result.content)
+                    self.assertEqual(structured(result)["revision"], revision)
                     found = await session.call_tool("memory_search", {"query": "checkout"})
-                    self.assertEqual({item["id"] for item in found.structuredContent["results"]},
+                    self.assertEqual({item["id"] for item in structured(found)["results"]},
                                      {"analysis-checkout-01", "agent-checkout-agent-0001"})
                     event = await session.call_tool("memory_event", {"event_id": "analysis-checkout-01"})
-                    self.assertTrue(event.structuredContent["active"])
+                    self.assertTrue(structured(event)["active"])
                     run = await session.call_tool("memory_run", {"run_id": "checkout-agent"})
-                    self.assertEqual(run.structuredContent["events"][0]["id"], "agent-checkout-agent-0001")
+                    self.assertEqual(structured(run)["events"][0]["id"], "agent-checkout-agent-0001")
                     result = await session.call_tool("memory_trace", {"node": "component:checkout"})
-                    self.assertEqual(result.structuredContent["freshness"]["analysis-checkout-01"]["state"], "current")
+                    self.assertEqual(structured(result)["freshness"]["analysis-checkout-01"]["state"], "current")
                     doc = await session.call_tool("memory_read_doc", {"path": "docs/symbiosis/README.md"})
-                    self.assertIn("Approved handoff", doc.structuredContent["content"])
+                    self.assertIn("Approved handoff", structured(doc)["content"])
                     refused = await session.call_tool("memory_read_doc", {"path": ".env"})
-                    self.assertTrue(refused.isError)
+                    self.assertTrue(field(refused, "isError", "is_error"))
+                    self.assertIn("Only Markdown under docs/symbiosis/", refused.content[0].text)
 
                     self.source.write_text("def pay():\n    return 2\n", encoding="utf-8")
                     self.commit("Refresh the source")
                     refreshed = await session.call_tool("memory_trace", {"node": "component:checkout"})
-                    self.assertNotEqual(refreshed.structuredContent["revision"], revision)
-                    self.assertEqual(refreshed.structuredContent["freshness"]["analysis-checkout-01"]["state"], "stale")
+                    self.assertNotEqual(structured(refreshed)["revision"], revision)
+                    self.assertEqual(structured(refreshed)["freshness"]["analysis-checkout-01"]["state"], "stale")
 
         asyncio.run(asyncio.wait_for(inspect(), timeout=30))
 
@@ -301,6 +330,231 @@ class DeliveryTests(RepoFixture):
         self.assertEqual(sorted(attempts), [1, 2])
         self.assertEqual(set(self.cli("claims", "--remote", "origin")["claims"]), {"checkout", "reporting"})
         self.assertEqual(self.git(self.bare, "rev-list", "--count", REF), "2")
+
+    def test_reservation_paths_are_case_sensitive(self):
+        claim = {"paths": ["backend/pay ment.py", "docs/"]}
+        self.assertTrue(includes(claim, "backend/pay ment.py"))
+        self.assertTrue(includes(claim, "docs/guide.md"))
+        self.assertFalse(includes(claim, "Backend/pay ment.py"))
+        self.assertFalse(includes(claim, "backend/Pay ment.py"))
+        self.assertFalse(includes(claim, "Docs/guide.md"))
+        self.assertFalse(includes(claim, "docs"))
+        rename = {"id": "rename", "paths": ["README.md", "Readme.md"]}
+        self.assertEqual(delivery.scope(rename)[0], rename["paths"])
+        self.assertTrue(all(includes(rename, path) for path in rename["paths"]))
+        self.assertTrue(delivery.conflicts(rename, {"id": "other", "paths": ["readme.md"]}))
+
+    def seed_ledger(self, receipts=None, claims=None):
+        state = {"schema": 1, "claims": claims or {}, "completed": {}, "receipts": receipts or {}}
+        content = (json.dumps(state, indent=2, sort_keys=True) + "\n").encode("ascii")
+        blob = subprocess.run(["git", "-C", str(self.repo), "hash-object", "-w", "--stdin"], input=content,
+                              capture_output=True, check=True).stdout.decode().strip()
+        tree = subprocess.run(["git", "-C", str(self.repo), "mktree"],
+                              input=f"100644 blob {blob}\tclaims.json\n".encode(),
+                              capture_output=True, check=True).stdout.decode().strip()
+        commit = self.git(self.repo, "commit-tree", tree, "-m", "Seed coordination ledger")
+        self.git(self.repo, "push", "origin", f"{commit}:{REF}")
+        return len(content)
+
+    def test_receipts_are_pruned_before_the_ledger_outgrows_its_limit(self):
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        old = {f"deployment-{i}-{i}": {"kind": "deployment", "deployment": i, "status": i, "revision": "0" * 40,
+                                       "environment": "production", "result": "success",
+                                       "recorded_at": (start + timedelta(seconds=i)).isoformat()}
+               for i in range(1, 9001)}
+        self.assertGreater(self.seed_ledger(old), 2 * 1024 * 1024)
+        plan = self.root / "backlog.json"
+        plan.write_text(json.dumps({"tasks": [self.task("alpha", "backend/")]}), encoding="utf-8")
+        claim = self.cli("claim", "alpha", "--remote", "origin", "--plan", str(plan), "--owner", "dev-run",
+                         "--base", self.base, "--branch", "symbiosis/alpha")
+        self.assertEqual(claim["id"], "alpha")
+        audit = self.cli("audit", "--remote", "origin", "--limit", "1000")
+        self.assertEqual(audit["total"], MAX_RECEIPTS)
+        self.assertIn("deployment-9000-9000", audit["receipts"])
+        self.assertNotIn("deployment-1-1", audit["receipts"])
+        previous = json.loads(self.git(self.bare, "show", f"{REF}~1:claims.json"))
+        self.assertEqual(len(previous["receipts"]), 9000)
+
+    def plan_file(self, *tasks):
+        file = self.root / "lease-plan.json"
+        file.write_text(json.dumps({"tasks": list(tasks)}), encoding="utf-8")
+        return file
+
+    def test_upgrade_preserves_legacy_reservation_and_ledger_history(self):
+        legacy = {"id": "legacy", "claim": "c" * 32, "owner": "legacy", "base": self.base,
+                  "branch": "symbiosis/legacy", "paths": ["old/"], "resources": [],
+                  "created_at": "2026-01-01T00:00:00+00:00"}
+        self.seed_ledger(claims={"legacy": legacy})
+        original = self.git(self.bare, "rev-parse", REF)
+        plan = self.plan_file(self.task("new-task", "new/"))
+        issued = self.claim("new-task", plan)
+        state = self.cli("claims", "--remote", "origin")
+        self.assertEqual(state["claims"]["legacy"], legacy)
+        self.assertEqual(state["expired"], [])
+        self.assertEqual(state["claims"]["new-task"]["token_hash"], digest(issued["token"]))
+        self.assertIn("expires_at", state["claims"]["new-task"])
+        self.assertEqual(self.git(self.bare, "rev-parse", f"{REF}^"), original)
+
+    def test_app_reservation_stays_readable_and_rejects_direct_mutations(self):
+        claim = {"id": "issue-2", "claim": "c" * 32, "owner": "github:alice", "base": self.base,
+                 "branch": "symbiosis/issue-2", "paths": ["src/"], "resources": [],
+                 "created_at": "2026-01-01T00:00:00+00:00", "github": {"id": 2, "login": "alice"}}
+        self.seed_ledger(claims={claim["id"]: claim})
+        original = self.git(self.bare, "rev-parse", REF)
+        args = (claim["id"], "--remote", "origin", "--claim-id", claim["claim"])
+        self.cli("extend-claim", *args, "--path", "docs/", failure="on its GitHub issue")
+        self.cli("renew-claim", *args, "--lease", "1h", failure="have no lease")
+        self.cli("release-claim", *args, "--owner", claim["owner"], "--outcome", "abandoned", failure="Use the GitHub App")
+        self.assertEqual(self.cli("renew-claim", *args, "--hold"), claim)
+        self.assertEqual(self.git(self.bare, "rev-parse", REF), original)
+
+    def claim(self, task, plan, *extra, repo=None, branch=None):
+        return self.cli("claim", task, "--remote", "origin", "--plan", str(plan), "--owner", task,
+                        "--base", self.base, "--branch", branch or f"symbiosis/{task}", *extra, repo=repo)
+
+    def test_many_agents_claim_at_once(self):
+        count = 10
+        plan = self.plan_file(*(self.task(f"task-{i}", f"area-{i}/") for i in range(count)))
+        clones = []
+        for i in range(count):
+            clone = self.root / f"agent clone {i}"
+            self.git(self.root, "clone", "--template=", "--quiet", self.bare.as_uri(), str(clone))
+            self.identity(clone)
+            clones.append(clone)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=count) as pool:
+            results = list(pool.map(lambda i: self.raw_cli(
+                "claim", f"task-{i}", "--remote", "origin", "--plan", str(plan), "--owner", f"agent-{i}",
+                "--base", self.base, "--branch", f"symbiosis/task-{i}", repo=clones[i]), range(count)))
+        self.assertEqual([row.returncode for row in results], [0] * count, [row.stderr for row in results])
+        self.assertEqual(len(self.cli("claims", "--remote", "origin")["claims"]), count)
+        self.assertEqual(self.git(self.bare, "rev-list", "--count", REF), str(count))
+
+    def test_lease_parsing_and_expiry(self):
+        self.assertEqual(delivery.lease_seconds("30m"), 1800)
+        self.assertEqual(delivery.lease_seconds("4h"), 14400)
+        self.assertIsNone(delivery.lease_seconds("none"))
+        for bad in ("1m", "31d", "4 hours", "0h", ""):
+            with self.assertRaises(SymbiosisError):
+                delivery.lease_seconds(bad)
+        now = datetime(2026, 11, 9, tzinfo=timezone.utc)
+        state = {"claims": {
+            "old": {"expires_at": (now - timedelta(seconds=1)).isoformat()},
+            "new": {"expires_at": (now + timedelta(hours=1)).isoformat()},
+            "held": {},
+        }}
+        self.assertEqual(delivery.prune_expired(state, now), ["old"])
+        self.assertEqual(set(state["claims"]), {"new", "held"})
+        with self.assertRaisesRegex(SymbiosisError, "expired"):
+            github_gate.claim_for({"task": "old", "claim": "a" * 32},
+                                  {"old": {"claim": "a" * 32, "expires_at": (now - timedelta(days=1)).isoformat()}},
+                                  {"mode": "cooperative"})
+
+    def expired_claim(self, task_id, path, token, branch=None):
+        moment = datetime.now(timezone.utc) - timedelta(hours=1)
+        return {"id": task_id, "claim": "c" * 32, "owner": "crashed-agent", "base": self.base,
+                "branch": branch or f"symbiosis/{task_id}-old", "paths": [path], "resources": [],
+                "created_at": (moment - timedelta(hours=4)).isoformat(), "lease": 4 * 3600,
+                "expires_at": moment.isoformat(), "token_hash": digest(token)}
+
+    def test_expired_reservation_stops_blocking_and_is_cleared(self):
+        self.seed_ledger(claims={"crashed": self.expired_claim("crashed", "backend/", "lost-token")})
+        listing = self.cli("claims", "--remote", "origin")
+        self.assertEqual(listing["expired"], ["crashed"])
+        plan = self.plan_file(self.task("rescue", "backend/pay ment.py"))
+        self.assertEqual(self.cli("plan", str(plan), "--remote", "origin")["waves"], [["rescue"]])
+        rescue = self.claim("rescue", plan)
+        self.assertEqual(set(self.cli("claims", "--remote", "origin")["claims"]), {"rescue"})
+        self.assertIn("Cleared expired reservations: crashed", self.git(self.bare, "log", "-1", "--format=%B", REF))
+        self.cli("renew-claim", "crashed", "--remote", "origin", "--claim-id", "c" * 32, "--token", "lost-token",
+                 failure="missing or has changed")
+        self.assertIn("expires_at", rescue)
+
+    def test_holder_can_revive_a_lapsed_lease_nobody_took(self):
+        self.seed_ledger(claims={"slow": self.expired_claim("slow", "backend/", "slow-token")})
+        shared = ("--remote", "origin", "--claim-id", "c" * 32)
+        self.cli("check-scope", "slow", *shared, failure="expired at")
+        self.cli("renew-claim", "slow", *shared, failure="Only the session holding slow")
+        renewed = self.cli("renew-claim", "slow", *shared, "--token", "slow-token", "--lease", "2h")
+        self.assertEqual(renewed["lease"], 7200)
+        self.assertEqual(self.cli("claims", "--remote", "origin")["expired"], [])
+
+    def test_journal_renews_the_lease_and_completion_holds_it(self):
+        run = "lease-run"
+        plan = self.plan_file({**self.task("lease", "backend/"), "paths": [
+            "backend/", f".symbiosis/events/agent-runs/{run}/"]})
+        claim = self.claim("lease", plan, "--lease", "1h")
+        shared = ("--remote", "origin", "--claim-id", claim["claim"])
+        worktree = self.root / "lease worktree"
+        self.cli("worktree", "lease", *shared, "--path", str(worktree))
+        started = self.cli("agent-commit", "-", *shared, payload=journal_event(run, "lease", 1, "started"),
+                           repo=worktree)
+        self.assertGreater(datetime.fromisoformat(started["lease_expires_at"]),
+                           datetime.fromisoformat(claim["expires_at"]))
+        done = journal_event(run, "lease", 2, "completed", checks=["Checked the lease flow."])
+        self.assertIsNone(self.cli("agent-commit", "-", *shared, payload=done, repo=worktree)["lease_expires_at"])
+        held = self.cli("claims", "--remote", "origin")["claims"]["lease"]
+        self.assertNotIn("expires_at", held)
+        self.assertEqual(held["claim"], claim["claim"])
+
+    def test_extend_claim_keeps_the_reservation(self):
+        plan = self.plan_file(self.task("alpha", "backend/pay ment.py"), self.task("beta", "reports/"))
+        alpha = self.claim("alpha", plan)
+        self.claim("beta", plan, repo=self.second)
+        shared = ("--remote", "origin", "--claim-id", alpha["claim"])
+        worktree = self.root / "extend worktree"
+        self.cli("worktree", "alpha", *shared, "--path", str(worktree))
+        (worktree / "docs").mkdir()
+        (worktree / "docs" / "guide.md").write_text("guide\n", encoding="utf-8")
+        failed = self.cli("check-scope", "alpha", *shared, repo=worktree, failure="outside the reservation")
+        self.assertIn(f"extend-claim alpha --remote origin --claim-id {alpha['claim']} --path docs/guide.md",
+                      failed.stderr)
+        self.cli("extend-claim", "alpha", *shared, "--path", "reports/x.py", failure="Extension overlaps beta")
+        self.cli("extend-claim", "alpha", *shared, "--path", "docs/", repo=self.second,
+                 failure="Only the session holding alpha")
+        extended = self.cli("extend-claim", "alpha", *shared, "--path", "docs/", "--resource", "docs-site")
+        self.assertEqual((extended["claim"], extended["branch"]), (alpha["claim"], alpha["branch"]))
+        self.assertEqual(extended["paths"], ["backend/pay ment.py", "docs/"])
+        self.assertEqual(extended["resources"], ["docs-site"])
+        self.assertEqual(self.cli("check-scope", "alpha", *shared, repo=worktree)["paths"], ["docs/guide.md"])
+        again = self.cli("extend-claim", "alpha", *shared, "--path", "docs/more.md")
+        self.assertEqual(again["paths"], extended["paths"])
+
+    def test_only_the_holder_changes_a_live_reservation(self):
+        plan = self.plan_file(self.task("alpha", "backend/"))
+        alpha = self.claim("alpha", plan)
+        self.assertEqual(len(alpha["token"]), 32)
+        shared = ("--remote", "origin", "--claim-id", alpha["claim"])
+        release = ("release-claim", "alpha", *shared, "--owner", "alpha", "--outcome", "abandoned")
+        self.cli(*release, repo=self.second, failure="Only the session holding alpha")
+        self.cli(*release, "--override", "Agent crashed", repo=self.second, failure="running lease")
+        self.cli("renew-claim", "alpha", *shared, "--hold", repo=self.second,
+                 env={"SYMBIOSIS_CLAIM_TOKEN": alpha["token"]})
+        self.assertNotIn("expires_at", self.cli("claims", "--remote", "origin")["claims"]["alpha"])
+        self.assertTrue(self.cli(*release, "--override", "Run finished but its PR was closed",
+                                 repo=self.second)["released"])
+        self.assertIn("Override by alpha: Run finished but its PR was closed",
+                      self.git(self.bare, "log", "-1", "--format=%B", REF))
+
+    def test_account_token_lets_any_session_of_that_account_resume(self):
+        plan = self.plan_file(self.task("alpha", "backend/"))
+        account = {"SYMBIOSIS_CLAIM_TOKEN": "account-a-" + "k" * 32}
+        alpha = self.claim_with_env("alpha", plan, account)
+        self.assertEqual(alpha["token_source"], "environment")
+        self.assertNotIn("token", alpha)
+        self.assertNotIn(account["SYMBIOSIS_CLAIM_TOKEN"], self.git(self.repo, "config", "--list", "--local"))
+        shared = ("--remote", "origin", "--claim-id", alpha["claim"])
+        fresh = self.root / "new cloud session"
+        self.git(self.root, "clone", "--template=", "--quiet", self.bare.as_uri(), str(fresh))
+        self.identity(fresh)
+        self.cli("renew-claim", "alpha", *shared, "--lease", "2h", repo=fresh,
+                 env={"SYMBIOSIS_CLAIM_TOKEN": "account-b-" + "k" * 32}, failure="Only the session holding alpha")
+        self.assertEqual(self.cli("renew-claim", "alpha", *shared, "--lease", "2h", repo=fresh, env=account)["lease"], 7200)
+        self.claim_with_env("beta", self.plan_file(self.task("beta", "web/")), {"SYMBIOSIS_CLAIM_TOKEN": "short"},
+                            failure="at least 32 characters")
+
+    def claim_with_env(self, task, plan, env, failure=None):
+        return self.cli("claim", task, "--remote", "origin", "--plan", str(plan), "--owner", task,
+                        "--base", self.base, "--branch", f"symbiosis/{task}", env=env, failure=failure)
 
     def test_plan_scope_and_release(self):
         plan = {"tasks": [
@@ -420,7 +674,7 @@ class DeliveryTests(RepoFixture):
                 pr_candidate = self.git(self.repo, "rev-parse", "HEAD")
         self.git(self.repo, "push", "origin", "main")
         gate = ["verify-history", "--base", base]
-        for (head, _), (_, _, run, _, _) in zip(heads, agents):
+        for (head, _), (_, _, run, _, _) in zip(heads, agents, strict=True):
             gate.extend(["--preserve", head, "--require-run", run])
         verified = self.cli(*gate)
         self.assertEqual(verified["new_agent_events"], 4)
@@ -432,7 +686,9 @@ class DeliveryTests(RepoFixture):
             "user": {"id": 101},
         }}
         pr_options = ("gate", "--event", "-", "--event-name", "pull_request", "--candidate")
-        self.assertEqual(self.cli(*pr_options, pr_candidate, payload=github_pr)["completed_runs"], ["checkout-agent"])
+        passed = self.cli(*pr_options, pr_candidate, payload=github_pr)
+        self.assertEqual(passed["completed_runs"], ["checkout-agent"])
+        self.assertEqual((passed["ok"], passed["warnings"]), (True, []))
         group = {"merge_group": {
             "base_sha": base, "base_ref": "refs/heads/main", "head_sha": verified["candidate"],
         }}
@@ -448,13 +704,36 @@ class DeliveryTests(RepoFixture):
         github_pr["pull_request"]["head"]["sha"] = rogue
         self.cli(*pr_options, rogue, payload=github_pr, failure="Paths outside the reservation")
 
+        leak = worktree / "docs" / "symbiosis" / "notes.md"
+        leak.parent.mkdir(parents=True)
+        leak.write_text("token: " + "ghp_" + "Q" * 36 + "\n", encoding="utf-8")
+        self.git(worktree, "add", "--", "docs/symbiosis/notes.md")
+        self.git(worktree, "commit", "--only", "-m", "Leak into memory", "--", "docs/symbiosis/notes.md")
+        rogue = self.git(worktree, "rev-parse", "HEAD")
+        github_pr["pull_request"]["head"]["sha"] = rogue
+        summary = self.root / "step-summary.md"
+        failed = self.raw_cli(*pr_options, rogue, payload=github_pr, env={"GITHUB_STEP_SUMMARY": str(summary)})
+        self.assertEqual(failed.returncode, 1, failed.stderr)
+        report = json.loads(failed.stdout)
+        self.assertFalse(report["ok"])
+        self.assertEqual([row["check"] for row in report["problems"]], ["scope", "privacy"])
+        scope_problem, privacy_problem = report["problems"]
+        self.assertEqual(scope_problem["paths"], ["docs/symbiosis/notes.md", "outside.txt"])
+        claim_id = self.cli("claims", "--remote", "origin")["claims"]["checkout"]["claim"]
+        self.assertIn(f"extend-claim checkout --remote origin --claim-id {claim_id} "
+                      "--path docs/symbiosis/notes.md --path outside.txt", scope_problem["fix"])
+        self.assertEqual((privacy_problem["path"], privacy_problem["line"]), ("docs/symbiosis/notes.md", 1))
+        self.assertNotIn("Q" * 36, failed.stdout + failed.stderr)
+        self.assertIn("gate found 2 problem(s)", failed.stderr)
+        self.assertIn("## Symbiosis gate: 2 problem(s)", summary.read_text(encoding="utf-8"))
+
         squash = self.git(self.repo, "commit-tree", "HEAD^{tree}", "-p", base, "-m", "Squashed candidate")
         self.cli(*gate, "--candidate", squash, failure="missing original commit")
         self.cli("verify-history", "--base", base, "--candidate", squash, failure="missing agent work commit")
 
         fresh = self.root / "fresh reviewer"
         self.git(self.root, "clone", "--template=", "--local", str(self.bare), str(fresh))
-        for (_, code), (_, _, run, _, _) in zip(heads, agents):
+        for (_, code), (_, _, run, _, _) in zip(heads, agents, strict=True):
             record = self.cli("memory", "--ref", "origin/main", "run", run, repo=fresh)
             self.assertEqual(record["parent"], kickoff["id"])
             self.assertEqual(record["phase"], "completed")

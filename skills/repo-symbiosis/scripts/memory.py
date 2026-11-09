@@ -398,7 +398,7 @@ def verify(repo, events, revision, base):
         output = repo.git("cat-file", "--batch-check=%(objectname) %(objecttype)",
                           data="".join(f"{key}\n" for key in queries).encode("utf-8")).split(b"\n")[:-1]
         require(len(output) == len(queries), "Git did not return every evidence lookup")
-        results = dict(zip(queries, output))
+        results = dict(zip(queries, output, strict=True))
         tree = repo.tree(revision)
         for key, answers in paths.items():
             found = results[key]
@@ -447,6 +447,19 @@ def freshness(event, tree):
     else:
         state = "external" if items(event, "links") else "unpinned"
     return {"state": state, "changed_paths": changed}
+
+
+def outdated(repo, base, candidate):
+    """List active facts whose evidence files change between base and candidate and no longer match."""
+    changed = set(repo.changed(base, candidate))
+    tree = repo.tree(candidate)
+    events = active_events(load_committed(repo, candidate))
+    rows = []
+    for event_id, event in sorted(events.items()):
+        touched = sorted(set(freshness(event, tree)["changed_paths"]) & changed)
+        if touched:
+            rows.append({"event": event_id, "summary": event["summary"], "paths": touched})
+    return {"base": base, "candidate": candidate, "checked": len(events), "outdated": rows}
 
 
 def search(events, query, history, limit, tree):

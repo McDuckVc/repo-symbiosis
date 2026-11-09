@@ -5,11 +5,11 @@ Install the approved wheel in a clean environment. Python 3.10 and 3.12 on Windo
 ```text
 python -m build
 python -m twine check --strict dist/*
-python -m pip install dist/repo_symbiosis-0.1.0-py3-none-any.whl
+python -m pip install dist/repo_symbiosis-0.2.0-py3-none-any.whl
 symbiosis --version
 ```
 
-Release the wheel, source distribution, checksums, and notes from a reviewed Git tag. Use the checksum-pinned public wheel to initialize a GitHub check. For a private installation, use a trusted internal artifact path and equivalent pinned workflow.
+Release the wheel, source distribution, checksums, and notes from a reviewed Git tag. Pushing a `v<version>` tag runs `.github/workflows/release.yml`. The full integration and lint matrix runs against the tagged commit before publication. The release job checks the tag against `__version__`, builds and validates both distributions, and publishes the release with `SHA256SUMS` and the pinned `--checker` URL in its notes. Use the checksum-pinned public wheel to initialize a GitHub check. For a private installation, use a trusted internal artifact path and equivalent pinned workflow.
 
 ## Reproduce the demo
 

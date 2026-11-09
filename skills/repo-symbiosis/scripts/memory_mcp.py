@@ -11,7 +11,7 @@ if not __package__:
     __package__ = "scripts"
 
 from .agent_memory import Snapshot
-from .repository import Repository
+from .repository import Repository, SymbiosisError
 
 
 def main():
@@ -21,10 +21,16 @@ def main():
     args = parser.parse_args()
 
     try:
-        from mcp.server.fastmcp import FastMCP
         from mcp.types import ToolAnnotations
+        try:
+            from mcp.server.mcpserver import MCPServer as FastMCP  # MCP Python SDK 2.x
+            from mcp.server.mcpserver.exceptions import ToolError
+        except ImportError:
+            from mcp.server.fastmcp import FastMCP  # MCP Python SDK 1.x
+            from mcp.server.fastmcp.exceptions import ToolError
     except ImportError as error:
-        parser.exit(1, f"Install the MCP SDK from requirements-mcp.txt in this Python environment. {error}\n")
+        parser.exit(1, "Install the optional MCP extra in this Python environment: "
+                       f"python -m pip install 'repo-symbiosis[mcp]' (requires mcp>=1.28,<3). {error}\n")
 
     source = Repository(args.repo, committed_read=True)
     source.revision(args.ref)
@@ -36,6 +42,13 @@ def main():
     def snapshot():
         return read_revision(source.revision(args.ref))
 
+    def answer(read):
+        # ToolError keeps its message for the client; SDK 2.x hides the text of any other exception.
+        try:
+            return read(snapshot())
+        except SymbiosisError as error:
+            raise ToolError(str(error)) from error
+
     server = FastMCP(
         "Repo Symbiosis Memory",
         instructions="Start with memory_overview, then search or trace the graph. "
@@ -46,32 +59,32 @@ def main():
     @server.tool(annotations=read_only)
     def memory_overview() -> dict[str, Any]:
         """Find the onboarding entry point, knowledge documents, graph size, and source coverage."""
-        return snapshot().overview()
+        return answer(lambda memory: memory.overview())
 
     @server.tool(annotations=read_only)
     def memory_search(query: str, history: bool = False, limit: int = 10) -> dict[str, Any]:
         """Find event summaries by task ID, component, or keywords, with source freshness."""
-        return snapshot().search(query, history, limit)
+        return answer(lambda memory: memory.search(query, history, limit))
 
     @server.tool(annotations=read_only)
     def memory_event(event_id: str, offset: int = 0, limit: int = 20) -> dict[str, Any]:
         """Read a memory event and a page of evidence, nodes, and edges."""
-        return snapshot().event(event_id, offset, limit)
+        return answer(lambda memory: memory.event(event_id, offset, limit))
 
     @server.tool(annotations=read_only)
     def memory_run(run_id: str, offset: int = 0, limit: int = 20) -> dict[str, Any]:
         """Read an agent run's attributed timeline, lifecycle status, and delegation parent."""
-        return snapshot().run(run_id, offset, limit)
+        return answer(lambda memory: memory.run(run_id, offset, limit))
 
     @server.tool(annotations=read_only)
     def memory_trace(node: str, hops: int = 2, limit: int = 30) -> dict[str, Any]:
         """Trace directed relationships around a node and identify stale evidence."""
-        return snapshot().trace(node, hops, limit)
+        return answer(lambda memory: memory.trace(node, hops, limit))
 
     @server.tool(annotations=read_only)
     def memory_read_doc(path: str, start_line: int = 1, limit: int = 80) -> dict[str, Any]:
         """Read committed Markdown within docs/symbiosis, by repository-relative path."""
-        return snapshot().document(path, start_line, limit)
+        return answer(lambda memory: memory.document(path, start_line, limit))
 
     server.run(transport="stdio")
 

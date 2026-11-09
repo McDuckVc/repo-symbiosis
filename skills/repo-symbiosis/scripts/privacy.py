@@ -14,6 +14,24 @@ RULES = {
     "literal-secret": re.compile(
         r"""(?i)\b(?:password|client_secret|api[_-]?key|access_token|secret_access_key)["']?\s*[:=]\s*["'][^"'\s<>$`{}]{12,}["']"""
     ),
+    "google-api-key": re.compile(r"\bAIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])"),
+    "stripe-key": re.compile(r"\b(?:sk|rk)_live_[0-9A-Za-z]{20,}\b"),
+    "gitlab-token": re.compile(r"\bglpat-[0-9A-Za-z_-]{20,}"),
+    "npm-token": re.compile(r"\bnpm_[A-Za-z0-9]{36}\b"),
+    "pypi-token": re.compile(r"\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,}"),
+    "huggingface-token": re.compile(r"\bhf_[A-Za-z0-9]{34,}\b"),
+    "sendgrid-key": re.compile(r"\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}"),
+    "telegram-bot-token": re.compile(r"\b[0-9]{8,10}:AA[A-Za-z0-9_-]{33}"),
+    "slack-webhook": re.compile(r"https://hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]{16,}"),
+    "azure-storage-key": re.compile(r"(?i)\bAccountKey=[A-Za-z0-9+/]{80,}"),
+    "jwt": re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
+    "bearer-header": re.compile(r"""(?i)\bauthorization["']?\s*[:=]\s*["']?bearer\s+[A-Za-z0-9._~+/=-]{20,}"""),
+    # Unquoted environment output such as API_TOKEN=abc..., skipping variables and obvious placeholders.
+    "env-secret": re.compile(
+        r"""^\s*(?:export\s+)?(?:[A-Z][A-Z0-9_]*)?(?:SECRET|TOKEN|PASSWORD|PASSWD|API_KEY|APIKEY|PRIVATE_KEY|ACCESS_KEY)"""
+        r"""[A-Z0-9_]*\s*=\s*(?!["'$<{])(?!(?i:\S*(?:example|placeholder|changeme|redacted|dummy|your[_-]|xxxx)))"""
+        r"""[^\s#]{12,}"""
+    ),
 }
 MAX_MEMORY_BYTES = 2 * 1024 * 1024
 

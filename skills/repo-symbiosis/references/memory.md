@@ -41,6 +41,6 @@ python <cli> --repo <repo> verify --base <protected-base>
 
 ## Integrity and retrieval
 
-Evidence is assessed against the requested `--rev`, which defaults to `HEAD`. Search and graph traces expose `current`, `stale`, `external`, or `unpinned` evidence. `coverage` separates reviewed, stale, missing and excluded files. `verify --base` detects rewritten or deleted baseline events. `verify --strict` fails when historical file evidence cannot be recovered.
+Evidence is assessed against the requested `--rev`, which defaults to `HEAD`. Search and graph traces expose `current`, `stale`, `external`, or `unpinned` evidence. `coverage` separates reviewed, stale, missing and excluded files. `verify --base` detects rewritten or deleted baseline events. `verify --strict` fails when historical file evidence cannot be recovered. `stale --base <rev> [--candidate <rev>]` lists active facts whose evidence files changed between two commits and no longer match. Add `--strict` to exit 1 when any are found. The PR gate reports the same list as non-blocking warnings. Refresh a fact by recording a successor that supersedes it.
 
 Keep authoritative source commits reachable when practical. After a squash merge a fresh clone may lack the original feature commit. Verification accepts exact content at the supplied target revision and lists historical evidence it cannot recover. Reconcile enduring facts to the merged commit while preserving the earlier event. Keep provider references and summarized observations separate from source-derived coverage.

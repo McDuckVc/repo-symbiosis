@@ -109,10 +109,14 @@ class GitHub:
 
     def update(self, change, message):
         branch = delivery.REF.removeprefix("refs/heads/")
-        for _ in range(6):
+        deadline = time.monotonic() + delivery.COORDINATION_DEADLINE
+        attempt = 0
+        while True:
             old, state = self.ledger()
             if not change(state):
                 return
+            delivery.prune_expired(state)
+            delivery.prune_receipts(state)
             content = json_bytes(state)
             require(len(content) <= 900 * 1024, "Coordination ledger reached the REST-backed preview size limit")
             delivery.decode_state(content)
@@ -136,4 +140,7 @@ class GitHub:
                 if latest is None or latest == old:
                     raise
                 require(old is None or self.contains(old, latest), "Coordination history was rewritten")
-        raise APIError(409)
+            attempt += 1
+            if time.monotonic() >= deadline:
+                raise APIError(409)
+            delivery.backoff(attempt)
