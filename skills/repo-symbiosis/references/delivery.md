@@ -8,7 +8,7 @@ Read the knowledge pack entry point and fetch the protected base. Find your task
 
 Resolve existing issue and PR references against the target repository. Capture requirements, acceptance checks, variants, dependencies, rollback needs, and whether each item is already merged. Analyze high-risk dependencies with `search`, `trace`, and source verification. Model dependencies for changes that must land first. Model shared write paths or resources for changes that need exclusive access. Examples include a schema, API contract, dependency lockfile, rollout flag, or shared staging environment. Split broad requests by independently testable outcomes and keep an explicit shared-contract task when multiple features depend on it.
 
-Write a backlog JSON file. `completed` contains dependencies verified as merged into the target base. `paths` contains literal repository-relative paths or prefixes ending in `/`. Reserve exact files where possible. Include intended Markdown and unique event paths. `resources` contains shared lock names. Higher integer `priority` goes first among ready tasks.
+Write a backlog JSON file. `completed` contains dependencies verified as merged into the target base. `paths` contains literal repository-relative paths or prefixes ending in `/`. Scope checks match Git paths exactly, including letter case, so `src/Foo.py` is outside a reservation for `src/foo.py`. Overlap checks between reservations ignore case. Reserve exact files where possible. Include intended Markdown and unique event paths. `resources` contains shared lock names. Higher integer `priority` goes first among ready tasks.
 
 ```json
 {

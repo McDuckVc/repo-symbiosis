@@ -1,6 +1,6 @@
 """Create safe repository scaffolding and inspect local prerequisites."""
 
-import importlib.util
+import importlib.metadata
 import re
 import sys
 
@@ -89,6 +89,15 @@ def write_manifest(repo, remote, task, run, claim_id):
     return {**prepare(repo, {path: json_bytes(value)}), "manifest": path}
 
 
+def mcp_supported():
+    try:
+        version = importlib.metadata.version("mcp")
+    except importlib.metadata.PackageNotFoundError:
+        return False
+    match = re.match(r"(\d+)\.(\d+)", version)
+    return bool(match) and (1, 28) <= tuple(map(int, match.groups())) < (2, 0)
+
+
 def doctor(repo, remote):
     git = repo.git("--version").decode().strip()
     version = re.search(r"\b(\d+)\.(\d+)", git)
@@ -113,7 +122,7 @@ def doctor(repo, remote):
     return {
         "version": __version__, "python": ".".join(map(str, sys.version_info[:3])), "git": git,
         "repository": str(repo.root), "policy": settings, "workflow_present": target(repo, WORKFLOW).is_file(),
-        "mcp_available": importlib.util.find_spec("mcp") is not None,
+        "mcp_available": mcp_supported(),
         "git_identity_configured": identity,
         "problems": problems,
     }

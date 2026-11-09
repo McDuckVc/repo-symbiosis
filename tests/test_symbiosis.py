@@ -9,14 +9,16 @@ import sys
 import tempfile
 import threading
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills" / "repo-symbiosis" / "scripts"
 sys.path.insert(0, str(SCRIPTS.parent))
 
-from scripts.delivery import REF, Ledger
+from scripts.delivery import MAX_RECEIPTS, REF, Ledger, includes
 from scripts.repository import Repository, SymbiosisError
+from scripts.setup_tools import mcp_supported
 
 
 def journal_event(run, task, sequence, phase, **details):
@@ -197,7 +199,7 @@ class MemoryTests(RepoFixture):
         self.assertEqual(next_run["parent"], handoff["id"])
         self.assertEqual(next_run["provider"], "antigravity")
 
-    @unittest.skipUnless(importlib.util.find_spec("mcp"), "Optional MCP SDK is not installed")
+    @unittest.skipUnless(mcp_supported(), "Optional MCP SDK (mcp>=1.28,<2) is not installed")
     def test_agent_memory_over_stdio(self):
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
@@ -301,6 +303,46 @@ class DeliveryTests(RepoFixture):
         self.assertEqual(sorted(attempts), [1, 2])
         self.assertEqual(set(self.cli("claims", "--remote", "origin")["claims"]), {"checkout", "reporting"})
         self.assertEqual(self.git(self.bare, "rev-list", "--count", REF), "2")
+
+    def test_reservation_paths_are_case_sensitive(self):
+        claim = {"paths": ["backend/pay ment.py", "docs/"]}
+        self.assertTrue(includes(claim, "backend/pay ment.py"))
+        self.assertTrue(includes(claim, "docs/guide.md"))
+        self.assertFalse(includes(claim, "Backend/pay ment.py"))
+        self.assertFalse(includes(claim, "backend/Pay ment.py"))
+        self.assertFalse(includes(claim, "Docs/guide.md"))
+        self.assertFalse(includes(claim, "docs"))
+
+    def seed_ledger(self, receipts):
+        state = {"schema": 1, "claims": {}, "completed": {}, "receipts": receipts}
+        content = (json.dumps(state, indent=2, sort_keys=True) + "\n").encode("ascii")
+        blob = subprocess.run(["git", "-C", str(self.repo), "hash-object", "-w", "--stdin"], input=content,
+                              capture_output=True, check=True).stdout.decode().strip()
+        tree = subprocess.run(["git", "-C", str(self.repo), "mktree"],
+                              input=f"100644 blob {blob}\tclaims.json\n".encode(),
+                              capture_output=True, check=True).stdout.decode().strip()
+        commit = self.git(self.repo, "commit-tree", tree, "-m", "Seed coordination ledger")
+        self.git(self.repo, "push", "origin", f"{commit}:{REF}")
+        return len(content)
+
+    def test_receipts_are_pruned_before_the_ledger_outgrows_its_limit(self):
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        old = {f"deployment-{i}-{i}": {"kind": "deployment", "deployment": i, "status": i, "revision": "0" * 40,
+                                       "environment": "production", "result": "success",
+                                       "recorded_at": (start + timedelta(seconds=i)).isoformat()}
+               for i in range(1, 9001)}
+        self.assertGreater(self.seed_ledger(old), 2 * 1024 * 1024)
+        plan = self.root / "backlog.json"
+        plan.write_text(json.dumps({"tasks": [self.task("alpha", "backend/")]}), encoding="utf-8")
+        claim = self.cli("claim", "alpha", "--remote", "origin", "--plan", str(plan), "--owner", "dev-run",
+                         "--base", self.base, "--branch", "symbiosis/alpha")
+        self.assertEqual(claim["id"], "alpha")
+        audit = self.cli("audit", "--remote", "origin", "--limit", "1000")
+        self.assertEqual(audit["total"], MAX_RECEIPTS)
+        self.assertIn("deployment-9000-9000", audit["receipts"])
+        self.assertNotIn("deployment-1-1", audit["receipts"])
+        previous = json.loads(self.git(self.bare, "show", f"{REF}~1:claims.json"))
+        self.assertEqual(len(previous["receipts"]), 9000)
 
     def test_plan_scope_and_release(self):
         plan = {"tasks": [

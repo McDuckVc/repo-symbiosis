@@ -24,7 +24,8 @@ def main():
         from mcp.server.fastmcp import FastMCP
         from mcp.types import ToolAnnotations
     except ImportError as error:
-        parser.exit(1, f"Install the MCP SDK from requirements-mcp.txt in this Python environment. {error}\n")
+        parser.exit(1, "Install the optional MCP extra in this Python environment: "
+                       f"python -m pip install 'repo-symbiosis[mcp]' (requires mcp>=1.28,<2). {error}\n")
 
     source = Repository(args.repo, committed_read=True)
     source.revision(args.ref)

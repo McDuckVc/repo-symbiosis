@@ -12,7 +12,9 @@ import uuid
 from unittest.mock import patch
 
 from test_symbiosis import RepoFixture
-from scripts import app_server, github_app, github_gate
+from datetime import datetime, timedelta, timezone
+
+from scripts import app_server, delivery, github_app, github_gate
 from scripts.github_api import APIError, GitHub
 from scripts.repository import SymbiosisError
 
@@ -218,3 +220,43 @@ class AppTests(unittest.TestCase):
         snapshots = [json.loads(body["tree"][0]["content"]) for _, path, body in writes if path == "/git/trees"]
         self.assertEqual(set(snapshots[-1]["receipts"]), {"other", "mine"})
         self.assertTrue(all(body["force"] is False for method, _, body in writes if method == "PATCH"))
+
+    def test_receipt_pruning_keeps_recent_replay_guards(self):
+        now = datetime(2026, 11, 9, tzinfo=timezone.utc)
+        stamp = lambda days, i: (now - timedelta(days=days, seconds=i)).isoformat()
+        state = {"receipts": {f"old-{i}": {"recorded_at": stamp(30, i)} for i in range(300)}}
+        state["receipts"].update({f"new-{i}": {"recorded_at": stamp(1, i)} for i in range(delivery.MAX_RECEIPTS)})
+        state["receipts"]["broken"] = {"recorded_at": "not-a-time"}
+        self.assertEqual(delivery.prune_receipts(state, now), 301)
+        self.assertEqual(set(state["receipts"]), {f"new-{i}" for i in range(delivery.MAX_RECEIPTS)})
+
+        recent = {"receipts": {f"r-{i}": {"recorded_at": stamp(2, i)} for i in range(delivery.MAX_RECEIPTS + 50)}}
+        self.assertEqual(delivery.prune_receipts(recent, now), 0)
+        self.assertEqual(len(recent["receipts"]), delivery.MAX_RECEIPTS + 50)
+
+        small = {"receipts": {"only": {"recorded_at": stamp(400, 0)}}}
+        self.assertEqual(delivery.prune_receipts(small, now), 0)
+        self.assertEqual(delivery.prune_receipts({"schema": 1}, now), 0)
+
+    def test_app_ledger_write_prunes_old_receipts(self):
+        api = GitHub.__new__(GitHub)
+        old = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        state = {"schema": 1, "claims": {}, "completed": {}, "receipts": {
+            f"deployment-{i}-{i}": {"kind": "deployment", "recorded_at": (old + timedelta(seconds=i)).isoformat()}
+            for i in range(delivery.MAX_RECEIPTS + 200)
+        }}
+        writes = []
+
+        def call(method, path, body=None):
+            writes.append((method, path, body))
+            return {"sha": HEAD} if path == "/git/trees" else {"sha": MERGE} if path == "/git/commits" else None
+
+        with (
+            patch.object(api, "ledger", return_value=(BASE, copy.deepcopy(state))),
+            patch.object(api, "call", side_effect=call),
+        ):
+            api.update(lambda current: github_app.receipt(current, "mine", {"kind": "test"}), "Receipt")
+        written = json.loads(next(body for _, path, body in writes if path == "/git/trees")["tree"][0]["content"])
+        self.assertEqual(len(written["receipts"]), delivery.MAX_RECEIPTS)
+        self.assertIn("mine", written["receipts"])
+        self.assertNotIn("deployment-0-0", written["receipts"])

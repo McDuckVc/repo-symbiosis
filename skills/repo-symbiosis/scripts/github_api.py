@@ -113,6 +113,7 @@ class GitHub:
             old, state = self.ledger()
             if not change(state):
                 return
+            delivery.prune_receipts(state)
             content = json_bytes(state)
             require(len(content) <= 900 * 1024, "Coordination ledger reached the REST-backed preview size limit")
             delivery.decode_state(content)

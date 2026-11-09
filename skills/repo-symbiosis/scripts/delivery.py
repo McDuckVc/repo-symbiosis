@@ -3,7 +3,7 @@
 import os
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from graphlib import CycleError, TopologicalSorter
 from pathlib import Path
 
@@ -16,6 +16,8 @@ REF = "refs/heads/symbiosis-coordination"
 CLAIM_ID = re.compile(r"[a-f0-9]{32}\Z")
 REMOTE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._-]*\Z")
 BRANCH = re.compile(r"symbiosis/[a-z0-9][a-z0-9-]{0,100}\Z")
+MAX_RECEIPTS = 1000
+RECEIPT_REPLAY_WINDOW = timedelta(days=7)
 
 
 def scope(task):
@@ -48,9 +50,9 @@ def conflicts(first, second):
 
 
 def includes(claim, path):
-    path = path.casefold()
-    return any(path == item.casefold() or item.endswith("/") and path.startswith(item.casefold())
-               for item in claim["paths"])
+    # Git paths are case-sensitive, so a reservation permits only the exact paths it names.
+    # Overlap detection between claims stays case-insensitive to stay safe on case-folding checkouts.
+    return any(path == item or item.endswith("/") and path.startswith(item) for item in claim["paths"])
 
 
 def backlog(data):
@@ -118,6 +120,36 @@ def schedule(tasks, completed, active, capacity):
     return {"waves": waves, "blocked": blocked, "completed": sorted(completed)}
 
 
+def receipt_time(row):
+    try:
+        moment = datetime.fromisoformat(row["recorded_at"])
+    except (TypeError, KeyError, ValueError):
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def prune_receipts(state, now=None):
+    """Keep the newest receipts in the ledger head so it stays under its size limits.
+
+    Pruned receipts remain in the coordination branch history. Receipts recorded within the replay
+    window are kept even above the cap, because they still guard against duplicate webhook deliveries.
+    """
+    receipts = state.get("receipts")
+    if not receipts or len(receipts) <= MAX_RECEIPTS:
+        return 0
+    now = now or datetime.now(timezone.utc)
+    oldest = datetime.min.replace(tzinfo=timezone.utc)
+    ordered = sorted(receipts, key=lambda key: (receipt_time(receipts[key]) or oldest, key))
+    removed = 0
+    for key in ordered[:len(receipts) - MAX_RECEIPTS]:
+        moment = receipt_time(receipts[key])
+        if moment and now - moment < RECEIPT_REPLAY_WINDOW:
+            break
+        del receipts[key]
+        removed += 1
+    return removed
+
+
 class Ledger:
     def __init__(self, repo, remote):
         require(REMOTE.fullmatch(remote), "Use a configured Git remote name")
@@ -152,6 +184,7 @@ class Ledger:
             result, changed = change(state["claims"], state["completed"])
             if not changed:
                 return result
+            prune_receipts(state)
             content = json_bytes(state)
             privacy.reject(privacy.inspect("claims.json", content))
             blob = self.repo.git("hash-object", "-w", "--stdin", data=content).strip()

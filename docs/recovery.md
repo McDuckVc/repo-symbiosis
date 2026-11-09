@@ -7,6 +7,17 @@
 3. Retry `agent-commit` with the same event ID and JSON. It returns the original journal commit when the event was already committed. Record new work with a new journal event.
 4. For an abandoned reservation, confirm there is no active PR. In App mode use the authorized issue command. In cooperative mode, use `release-claim` with the recorded owner and claim ID. For a merge, fetch the actual integration SHA and verify ancestry before recording completion.
 
+## Emergency hotfixes
+
+A production fix may need paths that another task has reserved, and the full claim, manifest and journal flow can be too slow during an incident.
+
+1. Open the hotfix PR from a branch off the protected base. Keep it small, and leave `.symbiosis/` and `docs/symbiosis/` unchanged.
+2. A maintainer on the ruleset bypass list merges it after review and the application CI. The bypass appears in GitHub's ruleset insights and audit log.
+3. Record a `decision` or `failure` event for the incident in a follow-up PR. Include the hotfix merge SHA and the reservations it touched.
+4. Tell the holders of affected reservations. Each holder merges the updated protected base into the task branch, resolves conflicts, and runs `check-scope <task> --remote origin --claim-id <id> --against <new-base>`. Changes that arrive from the base do not count against the reservation, so their claims stay valid.
+
+When a hotfix touches no reserved paths and time allows, use the normal reserved-task flow instead.
+
 ## App downtime
 
 Restart the webhook process and worker with the existing queue volume. Inspect `symbiosis-app --db PATH status`. Correct the failed delivery's permissions, repository policy, or network problem, then use `symbiosis-app --db PATH retry DELIVERY_ID`. The worker re-reads GitHub state. If GitHub missed delivery during an outage, use GitHub's delivery interface to redeliver it. Back up SQLite using its online backup facility or a consistent stopped-service volume snapshot. Keep the Git repository and its protected coordination branch backed up independently. [GitHub webhook delivery recovery](https://docs.github.com/en/webhooks/using-webhooks/handling-failed-webhook-deliveries)
